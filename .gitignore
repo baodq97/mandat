@@ -1,0 +1,7 @@
+# build output + repo-local tools (golangci-lint binary, mandat binary)
+/bin/
+/dist/
+
+# test artifacts
+*.test
+/coverage.out

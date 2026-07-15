@@ -1,0 +1,52 @@
+# Both jobs are keyless by design: the no-key gate is the floor; anything
+# needing a key is opt-in and never blocks CI (ADR-0001).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docs-gate:
+    name: docs gate (govkit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.0
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '22'
+
+      # pinned: an unpinned npx gate could flip CI red on an upstream release
+      # with zero repo changes (manual bump, same as the golangci-lint pin)
+      - name: govkit check
+        run: npx --yes govkit@0.7.1 check
+
+  go-gate:
+    name: go gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.0
+        with:
+          # `git describe` in the Makefile needs history; blobless keeps it cheap
+          fetch-depth: 0
+          filter: blob:none
+
+      - uses: actions/setup-go@v6.5.0
+        with:
+          go-version-file: go.mod
+          # cache: true is the default (module + build cache keyed on go.mod)
+
+      # Same gate as local: one definition, two consumers (ADR-0001).
+      - name: make check
+        run: make check

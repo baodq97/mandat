@@ -1,0 +1,114 @@
+# golangci-lint v2 config (schema `version: "2"`, tool pinned at v2.12.2 in the
+# Makefile). Curated set biased to zero false positives — never `default: all`.
+# Suppressions require `//nolint:<linter> // reason` (enforced by nolintlint).
+version: "2"
+
+run:
+  # v2 ships with NO default timeout; keep CI bounded.
+  timeout: 5m
+
+linters:
+  # standard = errcheck, govet, ineffassign, staticcheck, unused
+  # (staticcheck in v2 absorbed gosimple + stylecheck)
+  default: standard
+  enable:
+    # --- correctness, near-zero FP ---
+    - asasalint            # []any passed as ...any
+    - bidichk              # trojan-source unicode
+    - bodyclose            # unclosed HTTP response bodies
+    - copyloopvar          # redundant loop-var copies (Go 1.22+)
+    - durationcheck        # duration*duration multiplication bugs
+    - errorlint            # %w wrapping, errors.Is/As over ==/type-assert
+    - exhaustive           # enum switch coverage
+    - gocheckcompilerdirectives # malformed //go: directives
+    - intrange             # for i := range N (Go 1.22+)
+    - makezero             # append to non-zero-length make()
+    - nilnesserr           # returning the wrong (nil) error
+    - unconvert            # redundant type conversions
+    - wastedassign         # dead assignments
+    # --- database/sql (SQLite is the permanent store, D4) ---
+    - rowserrcheck         # rows.Err() must be checked
+    - sqlclosecheck        # Rows/Stmt/NamedStmt must be closed
+    # --- security ---
+    - gosec
+    # --- hygiene / style, curated ---
+    - misspell
+    - nolintlint           # every //nolint needs linter + reason
+    - revive               # explicit rule list below, not golint defaults
+    - sloglint             # log/slog call consistency
+    - usestdlibvars        # http.MethodGet, http.StatusOK, ...
+    # --- tests ---
+    - thelper              # helpers must call t.Helper()
+    - tparallel            # t.Parallel() misuse
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment   # micro-optimization noise
+        - shadow           # too many intentional shadows
+    exhaustive:
+      # a default: branch counts as covering the enum → kills the main FP class
+      default-signifies-exhaustive: true
+    gosec:
+      excludes:
+        # spawning subprocesses with variable args is this product's core
+        # function (runner supervisor, §4.6) — G204 would flag every dispatch
+        - G204
+    misspell:
+      locale: US
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    revive:
+      rules:
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: defer
+        - name: early-return
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: identical-branches
+        - name: if-return
+        - name: indent-error-flow
+        - name: range
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: superfluous-else
+        - name: time-naming
+        - name: unexported-return
+        - name: unreachable-code
+        - name: var-declaration
+        - name: var-naming
+
+  exclusions:
+    generated: strict      # v2 default, stated explicitly
+    presets:
+      # v2 has NO default exclusions; restore the sane FP suppressions.
+      - std-error-handling
+      - common-false-positives
+    rules:
+      # test files exercise subprocesses and fixture paths; security lint is noise there
+      - path: _test\.go$
+        linters:
+          - gosec
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    gofumpt:
+      extra-rules: true
+    goimports:
+      local-prefixes:
+        - github.com/baodq97/mandat
+
+issues:
+  # strict codebase: never truncate findings (defaults hide at 50/3)
+  max-issues-per-linter: 0
+  max-same-issues: 0
