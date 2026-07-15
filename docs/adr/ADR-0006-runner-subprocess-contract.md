@@ -1,8 +1,8 @@
 ---
 id: ADR-0006
 title: Runner subprocess contract — Claude Code CLI headless over the Agent SDK
-status: proposed
-owner: TBD
+status: accepted
+owner: baodq97
 date: 2026-07-16
 ---
 
