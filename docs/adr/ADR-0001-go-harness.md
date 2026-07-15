@@ -1,8 +1,8 @@
 ---
 id: ADR-0001
 title: Go harness — toolchain, gates, and layout
-status: proposed
-owner: TBD
+status: accepted
+owner: baodq97
 date: 2026-07-15
 ---
 

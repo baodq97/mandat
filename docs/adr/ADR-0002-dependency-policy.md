@@ -1,8 +1,8 @@
 ---
 id: ADR-0002
 title: Dependency policy — prefer libraries over own code, vet and stay current
-status: proposed
-owner: TBD
+status: accepted
+owner: baodq97
 date: 2026-07-15
 ---
 

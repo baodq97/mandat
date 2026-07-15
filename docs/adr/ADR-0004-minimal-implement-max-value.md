@@ -1,8 +1,8 @@
 ---
 id: ADR-0004
 title: Implementation stance — minimal implement, maximum value
-status: proposed
-owner: TBD
+status: accepted
+owner: baodq97
 date: 2026-07-15
 ---
 

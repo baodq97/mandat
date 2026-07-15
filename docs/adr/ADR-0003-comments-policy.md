@@ -1,8 +1,8 @@
 ---
 id: ADR-0003
 title: Comments policy — self-documenting code, comments only for what code cannot say
-status: proposed
-owner: TBD
+status: accepted
+owner: baodq97
 date: 2026-07-15
 ---
 
