@@ -21,8 +21,11 @@ LDFLAGS := -s -w -X github.com/baodq97/mandat/internal/buildinfo.version=$(VERSI
 all: build
 
 # CGO_ENABLED=0 is a gate, not an optimization: D3 (single static binary)
-# and D4 (pure-Go SQLite) fail the moment a dependency drags in cgo.
+# and D4 (pure-Go SQLite) fail the moment a dependency drags in cgo. The
+# ./... compile covers every plane package, so a cgo dep breaks the gate even
+# before it is wired into cmd/mandat; the second build produces the binary.
 build:
+	CGO_ENABLED=0 go build ./...
 	CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/$(BINARY) ./cmd/$(BINARY)
 
 fmt: $(GOLANGCI_LINT)
