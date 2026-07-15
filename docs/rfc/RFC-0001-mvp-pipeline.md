@@ -21,10 +21,12 @@ transition. Happy path, one role, no dependency waves.
 
 The load-bearing output of this RFC is a set of interfaces the rest of the product keys
 off: the `TaskContract` and `ResultContract` schemas, the orchestrator state machine as
-a pure function, the append-only journal schema, and the runner isolation and
-identity-injection seams. Those are the one-way doors. The plane package boundaries, the
-WIQL query, the poll interval, and the gate command list are two-way doors that US
-stories iterate.
+a pure function, the append-only journal schema, the runner isolation seam, and the
+identity-injection invariant (the delegated token never reaches the child). Those are the
+one-way doors. The plane package boundaries, the WIQL query, the poll interval, and the
+gate command list are two-way doors that US stories iterate; the concrete git
+credential-delivery mechanism is neither, it is an open question gated by spike
+S-credential-delivery (§Identity injection).
 
 This RFC carries a correction to a stale PRD phrase. PRD-0001 §Scope and spec §10 both
 name `client-credential` identity mode for the MVP. ADR-0005 (accepted) supersedes that:
@@ -107,12 +109,11 @@ control directory is excluded from the diff-inside-remit check.
   "title": "ResultContract",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "task_id", "status", "needs_human"],
+  "required": ["schema_version", "task_id", "status"],
   "properties": {
     "schema_version": { "type": "integer", "const": 1 },
     "task_id":        { "type": "string", "minLength": 1 },
     "status":         { "enum": ["completed", "needs_human", "failed"] },
-    "needs_human":    { "type": "boolean" },
     "reason":         { "type": "string" },
     "artifacts": {
       "type": "array",
@@ -140,16 +141,19 @@ control directory is excluded from the diff-inside-remit check.
 
 A file that is missing or fails this schema routes the task to `needs-human` (decision 3),
 never to a retry. `status: completed` requires at least one artifact carrying `repo` and
-`branch`; `pr_url` is present once the PR is opened. `needs_human` and `failed` require a
-`reason`.
+`branch`; `pr_url` is present once the PR is opened. `status: needs_human` and
+`status: failed` require a `reason`. The state machine keys solely on the `status` enum:
+the `needs_human` state is derived from `status == "needs_human"`, so no separate boolean
+field exists to disagree with the enum.
 
 ### Orchestrator state machine
 
 A pure function `Next(state, event) -> (state, error)`, total over the enumerated inputs,
 zero tokens, zero I/O (spec §4.3). Every plane keys off these states and the journal
-records every transition. States: `queued`, `in-progress`, `in-review`, `needs-human`,
-`done`, `failed`. The skeleton drives the subset reaching `in-review`, `needs-human`, and
-`failed`; `done` is enumerated but out of slice (decision 2).
+records every transition. Six states: `queued`, `in-progress`, `in-review`, `needs-human`,
+`done`, `failed`, joined by twelve transitions. The skeleton drives the subset reaching
+`in-review` and `needs-human`; `done` (decision 2) and `failed` (reachable only by the
+deferred `human_abandon`) are enumerated but out of slice.
 
 Transition table (an unlisted `(state, event)` pair returns an error and is a no-op, never
 a silent transition):
@@ -158,23 +162,32 @@ a silent transition):
 |---|---|---|---|
 | `dispatch` (consent: item assigned to `<dev-agent-user>`) | (start) | `queued` | yes |
 | `claim_ok` (worktree + sparse checkout + OS user ready) | `queued` | `in-progress` | yes |
-| `setup_failed` (isolation cannot be established) | `queued` | `failed` | yes (happy path skips) |
-| `result_ok` (valid ResultContract `completed` + gates green + diff-in-remit + PR open) | `in-progress` | `in-review` | yes |
-| `result_needs_human` (ResultContract `needs_human`) | `in-progress` | `needs-human` | yes |
+| `setup_failed` (isolation cannot be established) | `queued` | `needs-human` | yes (happy path skips) |
+| `result_ok` (valid ResultContract `status == "completed"` + gates green + diff-in-remit + PR probe confirms) | `in-progress` | `in-review` | yes |
+| `result_needs_human` (ResultContract `status == "needs_human"`) | `in-progress` | `needs-human` | yes |
 | `result_invalid` (missing or schema-invalid ResultContract, or runner crash) | `in-progress` | `needs-human` | yes |
 | `gate_red` (verification gate re-run fails) | `in-progress` | `needs-human` | yes |
 | `remit_violation` (post-hoc diff touches a path outside the remit) | `in-progress` | `needs-human` | yes |
+| `probe_failed` (Reviewer PR probe finds no PR, or PR `createdBy` ≠ the Dev agent user) | `in-progress` | `needs-human` | yes |
 | `human_requeue` | `needs-human` | `queued` | no (retry deferred, decision 3) |
 | `human_abandon` | `needs-human` | `failed` | no (deferred) |
 | `human_ratify` (merge / status flip) | `in-review` | `done` | no (out of slice, decision 2) |
 
-Two failure edges are deliberately distinct. `setup_failed` is a system fault before the
-agent runs (worktree, sparse checkout, or OS-user provisioning failed) and terminates at
-`failed` with no shared-checkout fallback (spec §4.5). `remit_violation` is a post-hoc
-finding on a run that did produce edits outside its allowed paths, and routes to
-`needs-human` for a human to adjudicate. A red gate re-run, an invalid or missing
-ResultContract, and an explicit agent `needs_human` all route to `needs-human`, matching
-the deterministic-failure set the PRD proxy metric counts (PRD-0001 §Success metrics).
+`needs-human` and `failed` separate a recoverable hold from a terminal human decision.
+`setup_failed` is a system fault before the agent runs (worktree, sparse checkout, or
+OS-user provisioning failed); it routes `queued -> needs-human` for a human to adjudicate,
+with no shared-checkout fallback (spec §4.5). `failed` is reserved for explicit human
+abandonment (`human_abandon`, deferred); no automatic edge reaches it. PRD-0001 §Success
+metrics enumerates three deterministic failures that fire the `needs-human` edge and so
+count against the clean-run proxy — a red gate re-run (`gate_red`), an isolation failure
+(`setup_failed`), and an invalid or missing ResultContract (`result_invalid`); all three
+route to `needs-human` here, which is the reconciliation F5 requires. Two further
+deterministic ground-truth failures join them, `remit_violation` (post-hoc diff outside
+the allowed paths) and `probe_failed`; the sixth `needs-human` event, `result_needs_human`,
+is the agent's own escalation request, not a deterministic failure. `probe_failed` closes
+the don't-trust-the-agent's-self-reported-PR seam: a schema-valid `completed` ResultContract
+with green gates and an in-remit diff still holds for a human when the Reviewer-identity
+ground-truth probe finds no PR, or a PR whose `createdBy` is not the Dev agent user.
 
 ```d2
 direction: right
@@ -191,20 +204,21 @@ queued:       { class: st }
 in_progress:  { class: st; label: "in-progress" }
 in_review:    { class: ok; label: "in-review" }
 needs_human:  { class: hold; label: "needs-human" }
-failed:       { class: bad }
+failed:       { class: bad; label: "failed (out of slice)" }
 done:         { class: done; label: "done (out of slice)" }
 
 start: { shape: circle; label: "" }
 start -> queued: dispatch
 
 queued -> in_progress: claim_ok
-queued -> failed: setup_failed
+queued -> needs_human: setup_failed
 
-in_progress -> in_review: "result_ok (gates green, PR open, diff in remit)"
+in_progress -> in_review: "result_ok (gates green, diff in remit, PR probe confirms)"
 in_progress -> needs_human: "result_needs_human"
 in_progress -> needs_human: "result_invalid"
 in_progress -> needs_human: "gate_red"
 in_progress -> needs_human: "remit_violation"
+in_progress -> needs_human: "probe_failed (no PR / createdBy ≠ dev agent)"
 
 needs_human -> queued: "human_requeue (deferred)"
 needs_human -> failed: "human_abandon (deferred)"
@@ -310,23 +324,41 @@ per-role OS user (`systemd-run --uid=<role-user>` or `setpriv`), bounded by file
 permissions. Each child gets its own `HOME` and `CLAUDE_CONFIG_DIR` so per-role config and
 session stores do not collide. The `--bare` flag disables ambient discovery of hooks,
 skills, MCP, and CLAUDE.md, so nothing loads except what this invocation names. Failure to
-establish any layer is `setup_failed` and terminates the task (`failed`); there is no
-shared-checkout fallback.
+establish any layer fires `setup_failed`, which routes the task `queued -> needs-human` for
+a human to adjudicate (spec §4.5); there is no shared-checkout fallback and no automatic
+retry.
 
 ### Identity injection (decision 8)
 
-Broker mint-on-demand keeps the git and tracker credential off disk and out of the child
-environment. Git is configured with `credential.helper = mandat git-credential`; when git
-needs a credential for a fetch or push, it invokes that helper (the `mandat` binary
-re-invoked, spec §4.1), which mints a fresh delegated agent-user token through the
-ADR-0005 three-leg chain and returns it over the git credential-helper stdio protocol. The
-token lives only for that operation, never in an environment variable and never written to
-disk. Tracker access (read, comment) goes through a mandat-provided MCP server backed by
-the same broker, wired via `--mcp-config`. The per-role OS user is the runtime binding to
-the role's Entra identity: the broker mints for the role that owns the calling process.
-Anthropic model auth is a separate credential plane, the owner's Claude Code OAuth token
-(`claude setup-token`) surfaced to the `--bare` child via `apiKeyHelper` (PRD-0001
-§Prerequisites), never mixed with the git or tracker token.
+The invariant is pinned as a one-way door: the broker mints a delegated agent-user token on
+demand through the ADR-0005 three-leg chain, and that token is never reachable by the
+per-role child process — never in the child's environment, never in a file or argv the
+child can read, alive only for the single operation that needs it. The per-role OS user is
+the runtime binding to the role's Entra identity: the broker mints for the role that owns
+the calling process, and the token stays inside the broker's own process boundary. Tracker
+access (read, comment) goes through a mandat-provided MCP server backed by the same broker,
+wired via `--mcp-config`, so no tracker token reaches the child either. Anthropic model auth
+is a separate credential plane, the owner's Claude Code OAuth token (`claude setup-token`)
+surfaced to the `--bare` child via `apiKeyHelper` (PRD-0001 §Prerequisites), never mixed
+with the git or tracker token.
+
+The concrete git delivery mechanism is not pinned. S3 proved a delegated Entra token
+authenticates against ADO repos over HTTPS; it did not prove an invariant-preserving
+delivery. S3 exercised the write path with `http.extraheader` Bearer, which writes the token
+into `.git/config` and process argv where a child running as the role OS user can read it —
+a direct breach of the invariant above. Two further facts block a naive pin: the git
+credential-helper stdio protocol returns username/password, so git emits `Authorization:
+Basic`, not Bearer; and a helper that emits an `authtype`/Bearer credential needs git ≥ 2.46,
+while the dev box and the S3 sandbox run git 2.43. The delivery mechanism is therefore an
+OPEN QUESTION resolved by a named spike, **S-credential-delivery**, whose matrix is
+{ credential-helper returning a Basic-password (git ≥ 2.46), credential-helper returning
+`authtype`/Bearer (git ≥ 2.46), ephemeral per-operation `http.extraheader` scoped to one
+push } × ( ADO accepts the delegated token in that shape ) × ( the token is invisible to a
+process running as the role OS user ). A cell qualifies only if it clears all three columns;
+the spike gates the runner's credential code, which is not written until a cell passes.
+`mandat doctor` gains a git version floor parallel to the CLI ≥ 2.1.208 floor (ADR-0006,
+§4.10): it asserts the installed git meets the minimum the chosen S-credential-delivery
+mechanism requires and fails before first dispatch otherwise.
 
 ### Role config and playbook load (decision 9)
 
@@ -349,7 +381,7 @@ no `pkg/`. The skeleton adds one package per plane it touches.
 
 | Package | Responsibility |
 |---|---|
-| `cmd/mandat` | CLI entrypoint; adds `serve` (the poll/dispatch daemon) and `git-credential` (the helper) subcommands beside `version` |
+| `cmd/mandat` | CLI entrypoint; adds `serve` (the poll/dispatch daemon) and the credential-injection entrypoint (subcommand shape decided by spike S-credential-delivery) beside `version` |
 | `internal/config` | `/etc/mandat/config.yaml`: repo registry, `identity_mode`, role table |
 | `internal/task` | `TaskContract` type and validation |
 | `internal/result` | `ResultContract` type, JSON-schema validation, the `.mandat/result.json` path constant |
@@ -357,7 +389,7 @@ no `pkg/`. The skeleton adds one package per plane it touches.
 | `internal/orchestrator` | The pure-function state machine (states, transition table, `Next`) |
 | `internal/tracker` | `Tracker` (poll, comment, apply) and `Forge` (create PR) interfaces |
 | `internal/adapter/azuredevops` | ADO implementation: WIQL poll, work-item read/comment, draft-PR create via REST |
-| `internal/identity` | Token broker (ADR-0005 three-leg chain) and the git-credential helper backing |
+| `internal/identity` | Token broker (ADR-0005 three-leg chain) and the git credential-delivery backing (mechanism gated by spike S-credential-delivery) |
 | `internal/workspace` | Mirror cache, worktree, sparse checkout, remit-diff |
 | `internal/runner` | Subprocess supervisor (ADR-0006), stream-json parse, session, OS-user isolation |
 | `internal/verify` | Gate re-run, diff-inside-remit, PR-existence probe under the Reviewer identity |
@@ -450,11 +482,25 @@ These stay open by instruction; this RFC does not invent answers.
   delegated token and drop ADO writes to the service-principal fallback. Untestable in the
   dogfood tenant (no Entra ID P1); must be validated in a P1 tenant before a CA-enforcing
   deployment.
+- **Invariant-preserving git credential delivery (spike S-credential-delivery).** Which of
+  { credential-helper Basic-password (git ≥ 2.46), credential-helper `authtype`/Bearer
+  (git ≥ 2.46), ephemeral per-operation `http.extraheader` } delivers the delegated
+  agent-user token so ADO accepts it and no process running as the role OS user can read it.
+  S3 proved the token authenticates, not that any delivery preserves the on-disk/on-env
+  invariant; the spike gates the runner's credential code and sets the `mandat doctor` git
+  version floor. Until it resolves, the runner's push path stays unbuilt.
 
 ## Success criteria (acceptance)
 
-The 28 criteria below are the slice's success bar, each provable at a contract-test seam
-(§9) or against a cited decision. They fold the BA's acceptance set into this RFC.
+The 28 criteria below are the slice's success bar, and they fold the BA's acceptance set
+into this RFC. Most are provable at a contract-test seam (§9) or against a cited decision,
+but the §9 doubles have a ceiling: recorded ADO fixtures and a fake `claude` can simulate a
+`createdBy` value or a probe's acting identity, they cannot establish live ADO/Entra
+attribution. AC-26 (PR `createdBy` = the Dev agent user) and AC-27 (the probe runs under the
+Reviewer identity) therefore fall to a live integration check against the kept S1/S3 spike
+assets — a `mandat doctor`-style live assertion — not to the fixture or fake-`claude`
+doubles. Every other criterion, AC-15 included (no token in the child env or on disk), is
+genuinely seam-testable.
 
 Ingestion and dispatch:
 
@@ -478,20 +524,20 @@ Runner spawn and session:
 - [ ] AC-12 `--model` carries the role's tier: default `sonnet`, a per-role override to `opus` honored (decision 7).
 - [ ] AC-13 A deterministic `--session-id` is written to `runs.session_id` before spawn and matches the `system/init` event's `session_id`.
 - [ ] AC-14 The child runs as the per-role OS user with its own `HOME` and `CLAUDE_CONFIG_DIR` (ADR-0006).
-- [ ] AC-15 No Entra token appears in the child environment or on disk; git credentials arrive only through `mandat git-credential` (decision 8).
+- [ ] AC-15 No Entra token appears in the child environment or on disk; git credentials reach git only through the broker's on-demand mint, never via the child env or a file the child can read (decision 8; the delivery mechanism is gated by spike S-credential-delivery). Seam-testable with the fake `claude` and a stub broker.
 
 Edit inside remit:
 
 - [ ] AC-16 The fake `claude` edits a file inside the remit paths; the post-run branch diff touches only remit paths and the diff-inside-remit check passes.
 - [ ] AC-17 A run whose diff touches a path outside the remit fails the diff-inside-remit check and routes to `needs-human` with a journaled `remit_violation` reason.
-- [ ] AC-18 Failure to establish isolation routes the task `queued -> failed` and journals the setup fault; there is no shared-checkout fallback (§4.5).
+- [ ] AC-18 Failure to establish isolation routes the task `queued -> needs-human` (`setup_failed`) and journals the setup fault; there is no shared-checkout fallback and no auto-retry (§4.5).
 
 ResultContract write and validate:
 
 - [ ] AC-19 The subprocess writes the ResultContract to `.mandat/result.json` (`MANDAT_RESULT_PATH`); the supervisor reads that file and never parses stream-json as the outcome (ADR-0006, §4.6).
 - [ ] AC-20 A schema-valid ResultContract `status=completed` with one artifact `{repo, branch, pr_url}` advances the task toward `in-review` (given green gates and the PR).
 - [ ] AC-21 A missing or schema-invalid ResultContract routes `in-progress -> needs-human` with no auto-retry (decision 3), and the raw bytes plus `valid=0` land in `results`.
-- [ ] AC-22 A ResultContract `status=needs_human` (`needs_human=true`, `reason` set) routes `in-progress -> needs-human` and journals the reason.
+- [ ] AC-22 A ResultContract `status=needs_human` (`reason` set) routes `in-progress -> needs-human` and journals the reason; the state machine keys on the `status` enum alone.
 
 Gate re-run:
 
@@ -501,9 +547,9 @@ Gate re-run:
 
 PR under the agent user, and journal:
 
-- [ ] AC-26 The Dev branch is pushed with a token minted on demand by `mandat git-credential` (ADR-0005 chain), attributed to `<dev-agent-user>`; a draft PR opens under `<dev-agent-user>` (PR `createdBy` = the agent user) and its url matches the ResultContract artifact.
-- [ ] AC-27 The PR-existence ground-truth probe runs under `<reviewer-agent-user>`, not the Dev identity (writer ≠ scorer as an IAM property, §4.1, §4.7), and confirms the PR before `in-review`.
-- [ ] AC-28 The end-to-end happy path produces a journal whose ordered rows reconstruct `dispatch -> claim_ok -> result_ok -> gate_rerun -> pr_opened -> in-review` with no `needs-human` hold, every row carrying acting identity, UTC timestamp, and (on the completed run) `total_cost_usd` and `usage`; no journal row is ever updated or deleted (§4.9).
+- [ ] AC-26 The Dev branch is pushed with a delegated agent-user token minted on demand by the broker (ADR-0005 chain; invariant-preserving delivery gated by spike S-credential-delivery), attributed to `<dev-agent-user>`; a draft PR opens under `<dev-agent-user>` (PR `createdBy` = the agent user) and its url matches the ResultContract artifact. Verified by a live integration check against the kept S1/S3 spike assets (a `mandat doctor`-style live assertion), not by the §9 doubles, which can only simulate the `createdBy` value.
+- [ ] AC-27 The PR-existence ground-truth probe runs under `<reviewer-agent-user>`, not the Dev identity (writer ≠ scorer as an IAM property, §4.1, §4.7), and confirms the PR before `in-review`; a probe that finds no PR, or a PR whose `createdBy` is not the Dev agent user, fires `probe_failed -> needs-human`. Verified by a live integration check against the kept S1/S3 spike assets (a `mandat doctor`-style live assertion), not by the §9 doubles, which can only simulate the probe's acting identity.
+- [ ] AC-28 The end-to-end happy path produces a journal whose ordered rows reconstruct `dispatch -> claim_ok -> gate_rerun -> pr_opened -> probe_pr_exists -> result_ok -> in-review` with no `needs-human` hold, every row carrying acting identity, UTC timestamp, and (on the completed run) `total_cost_usd` and `usage`; no journal row is ever updated or deleted (§4.9).
 
 ## Decision
 
@@ -515,8 +561,10 @@ state machine; every transition and probe lands in the append-only journal keyed
 identity. The skeleton is done at `in-review` with a draft PR under the Dev agent user,
 green gate re-run, and a complete journal (decision 2). The four contracts are one-way
 doors and are fixed now; the plane package boundaries, WIQL query, poll interval, gate
-command list, and budget default are two-way doors that US stories iterate. The five open
-questions above stay open.
+command list, and budget default are two-way doors that US stories iterate. The concrete
+git credential-delivery mechanism is pinned to neither: it is the open question spike
+S-credential-delivery resolves, and the delegated-token invariant it must preserve is the
+one-way door. The six open questions above stay open.
 
 Recommendation to the owner: advance RFC-0001 to `proposed` after an independent red-team
 pass (the harness rule before any status flip), then to `accepted` on ratification, at
