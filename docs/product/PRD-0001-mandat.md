@@ -1,8 +1,8 @@
 ---
 id: PRD-0001
 title: Mandat — tracker work items to reviewed pull requests under revocable mandates
-status: draft
-owner: TBD
+status: approved
+owner: baodq97
 date: 2026-07-15
 ---
 
