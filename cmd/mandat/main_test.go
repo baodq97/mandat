@@ -18,6 +18,12 @@ func TestRun(t *testing.T) {
 		{name: "version", args: []string{"version"}, wantCode: 0, wantStdout: "mandat "},
 		{name: "no args", args: nil, wantCode: 2, wantStderr: "design-gated"},
 		{name: "unknown command", args: []string{"dispatch"}, wantCode: 2, wantStderr: "design-gated"},
+		// The new subcommands route to their handlers, not the design-gated path: a
+		// missing config file fails fast with a config error before any daemon loop or
+		// stdin read, which proves dispatch reached each handler.
+		{name: "serve routes", args: []string{"serve", "--config", "/nonexistent/mandat.yaml"}, wantCode: 1, wantStderr: "config"},
+		{name: "doctor routes", args: []string{"doctor", "--config", "/nonexistent/mandat.yaml"}, wantCode: 1, wantStderr: "config"},
+		{name: "git-credential routes", args: []string{"git-credential", "--config", "/nonexistent/mandat.yaml", "get"}, wantCode: 1, wantStderr: "config"},
 	}
 
 	for _, tt := range tests {

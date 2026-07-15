@@ -19,10 +19,29 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 1 && args[0] == "version" {
+	if len(args) == 0 {
+		return designGated(stderr)
+	}
+	switch args[0] {
+	case "version":
 		fmt.Fprintln(stdout, "mandat "+buildinfo.Version())
 		return 0
+	case "serve":
+		return serve(args[1:], stdout, stderr)
+	case "doctor":
+		return doctor(args[1:], stdout, stderr)
+	case "git-credential":
+		// The credential helper is a stdio filter: git writes its request on stdin,
+		// so this one subcommand reads os.Stdin directly rather than through run's
+		// writer-only seam. The protocol core (gitCredential) stays stdin-injectable
+		// for tests.
+		return gitCredentialCmd(args[1:], os.Stdin, stdout, stderr)
+	default:
+		return designGated(stderr)
 	}
-	fmt.Fprintln(stderr, "mandat: only `mandat version` exists yet; the runtime is design-gated (see docs/)")
+}
+
+func designGated(stderr io.Writer) int {
+	fmt.Fprintln(stderr, "mandat: only `version`, `serve`, `doctor`, and `git-credential` exist yet; other runtime is design-gated (see docs/)")
 	return 2
 }
