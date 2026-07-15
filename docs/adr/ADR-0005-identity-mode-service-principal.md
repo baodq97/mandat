@@ -1,8 +1,8 @@
 ---
 id: ADR-0005
 title: Identity mode — agent-user pair where proven, service principal as fallback
-status: proposed
-owner: TBD
+status: accepted
+owner: baodq97
 date: 2026-07-15
 ---
 
