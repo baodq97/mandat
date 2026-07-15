@@ -21,7 +21,7 @@ Code gate:
 
 Docs gate (govkit via npx, no install step):
 
-- `npx govkit check`: the no-key CI gate. Runs `verify` then `eval`; exits non-zero if either fails.
+- `npx govkit check --journal`: the no-key CI gate. Runs `verify` then `eval`; exits non-zero if either fails. `--journal` appends a sensor line to `.govkit/journal.jsonl` (per-machine, gitignored) that the distill loop reads together with `LEARNING-LOOP.md` — use it on every local run.
 - `npx govkit verify`: structural gate. Front-matter completeness, status enum, id↔filename convention, INDEX sync, globally unique ids, no unresolved placeholders.
 - `npx govkit eval`: quality signal. A small required floor that blocks (minimum word count, no template filler) plus an advisory 0–100 score against the rubrics in `govkit.yml` (threshold 70; a lower score warns, never blocks).
 - `d2 docs/diagrams/system-context.d2 docs/diagrams/system-context.svg`: re-render the context diagram after editing the `.d2` source. Diagrams are D2.
@@ -53,6 +53,9 @@ A `PreToolUse` hook in `.claude/settings.json` runs `npx govkit audit-write` on 
 ## Agent orchestration
 
 The lead session model (Fable) guides, decides, and integrates — it never does detail work itself. Fan hands-on work out with an explicit `model` on every Agent/Workflow `agent()` call: `opus` for senior-level work (code review, adversarial verification, complex implementation), `sonnet` for mid-level work (research sweeps, scaffolding, mechanical edits). Never spawn a subagent on the lead model.
+
+- **Reusable role agents live in `.claude/agents/`** (`red-teamer`, `spec-drafter`, `gate-verifier`) — dispatch these instead of re-briefing `general-purpose` from scratch. New recurring role = new agent file, never a longer ad-hoc prompt. This is the dev-time mirror of the product's role plane: a role is config.
+- **Skills are two-tier.** Tier 1: small, dependency-free skills that do one job independently and load on demand (spec-red-team, spec-author, better-wording); agent definitions carry *hints* naming which Tier-1 skills to load, with the procedure embedded as fallback. Tier 2: orchestration — the lead composes Tier-1 workers through Workflow scripts (`.claude/workflows/`) or orchestrator skills. Tier-1 skills never depend on each other or on Tier 2; anything that coordinates is Tier 2 by definition.
 
 ## Architecture (design-level)
 

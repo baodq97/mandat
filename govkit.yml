@@ -4,10 +4,11 @@
 # govkit by editing this file.
 schemaVersion: 1
 
-# Optional `--journal` sensor destination (verify/eval/check append one JSON line per
-# run; observational only — never affects exit codes). Default shown; must stay in-repo.
-# journal:
-#   path: .govkit/journal.jsonl
+# `--journal` sensor destination (verify/eval/check append one JSON line per run;
+# observational only — never affects exit codes). Feeds the R7 distill loop; the
+# file is per-machine sensor data, gitignored.
+journal:
+  path: .govkit/journal.jsonl
 
 # Optional risk tiers for verify checks: demote a kind to `advisory` and it is still
 # reported (warn prefix + its own count) but never fails the gate — e.g. keep INDEX-sync

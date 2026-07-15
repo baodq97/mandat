@@ -5,3 +5,6 @@
 # test artifacts
 *.test
 /coverage.out
+
+# per-machine gate sensor data (feeds distill locally, never shared state)
+/.govkit/

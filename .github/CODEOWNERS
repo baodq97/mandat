@@ -1,0 +1,6 @@
+# Governed docs are owned by the human doc owner. With a single GitHub identity,
+# codeowner-review cannot be a required check yet (a PR author cannot approve
+# their own PR); this file documents ownership now and becomes enforceable the
+# day agent commits move to their own identity — which is this product's thesis.
+docs/ @baodq97
+govkit.yml @baodq97
