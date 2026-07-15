@@ -88,9 +88,12 @@ where this chain is not proven.
 - **Revocation is TTL-bounded, not instantaneous.** New-credential denial is immediate; an
   already-minted `T3` works until it expires (about one hour). Shortening effective exposure
   means shorter token lifetimes, not a claim of instant cutoff.
-- **Writer ≠ scorer is out of scope here.** S3 proves the creator can open a PR. The
-  creator-cannot-approve-own-PR branch policy, which makes reviewer ≠ author an IAM
-  property, is a separate Azure DevOps configuration and its own later check.
+- **Writer ≠ scorer, proven as a follow-on.** S3 proves the creator can open a PR; a
+  follow-on probe on the same repo set the "creator cannot approve own PR" branch policy
+  (minimum one approver, the creator's vote does not count) and confirmed the gate. The
+  agent user cast an approve vote on its own PR, yet completion was refused with HTTP `403`,
+  "needs a minimum number of approvals (1) from other users", until a different user
+  approves. So reviewer ≠ author holds as an IAM property, not convention.
 - **Untested, as in S1 round 3:** conditional-access policies evaluated against the agent
   user, the per-seat Basic license cost per assignable role, and the terms-of-service line
   on a non-human directory seat. Each is a check to run, not a known blocker.
