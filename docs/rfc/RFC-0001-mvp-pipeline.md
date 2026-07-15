@@ -489,6 +489,10 @@ These stay open by instruction; this RFC does not invent answers.
   S3 proved the token authenticates, not that any delivery preserves the on-disk/on-env
   invariant; the spike gates the runner's credential code and sets the `mandat doctor` git
   version floor. Until it resolves, the runner's push path stays unbuilt.
+  **Resolved 2026-07-16 by S-credential-delivery:** the `mandat git-credential` helper
+  delivers the delegated token as a Basic-auth password on git 2.43, invariant preserved
+  (token never in `.git/config`, on disk, the child env, or argv); the F4 kill criterion is
+  falsified and the runner's push path is unblocked.
 
 ## Success criteria (acceptance)
 

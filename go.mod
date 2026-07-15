@@ -4,6 +4,8 @@ go 1.26.5
 
 tool golang.org/x/vuln/cmd/govulncheck
 
+require gopkg.in/yaml.v3 v3.0.1
+
 require (
 	golang.org/x/mod v0.38.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
