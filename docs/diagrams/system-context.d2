@@ -1,0 +1,88 @@
+direction: right
+
+classes: {
+  external: {
+    shape: cloud
+    style.fill: "#00A7E1"
+    style.stroke: "#2A2A33"
+  }
+  human: {
+    shape: person
+    style.fill: "#66CAD8"
+    style.stroke: "#2A2A33"
+  }
+  plane: {
+    style.fill: "#9FA7D0"
+    style.stroke: "#2A2A33"
+  }
+  store: {
+    shape: cylinder
+    style.fill: "#E82370"
+    style.stroke: "#2A2A33"
+  }
+  proc: {
+    style.fill: "#CBDB2A"
+    style.stroke: "#2A2A33"
+  }
+}
+
+owner: Owner / Team {class: human}
+entra: Microsoft Entra ID {
+  class: external
+  blueprint: Agent identity blueprint
+  ids: "Agent identities (PO, SA, Dev, QA, Reviewer)"
+  blueprint -> ids: issues tokens (FIC)
+}
+ado: Azure DevOps {class: external}
+jira: Jira (later) {
+  class: external
+  style.stroke-dash: 3
+}
+claude_api: Anthropic API {class: external}
+teams: MS Teams (notify only) {class: external}
+
+vm: Customer Linux VM {
+  arc: Azure Arc agent (himds) {class: proc}
+
+  mandat: mandat (single Go binary) {
+    identity: Identity client {class: plane}
+    adapters: Tracker adapters {class: plane}
+    orch: "Orchestrator (state machine + dispatcher)" {class: plane}
+    roles: "Role registry (config)" {class: plane}
+    runner: Runner supervisor {class: plane}
+    verify: Verification plane {class: plane}
+    web: "Dashboard (Entra SSO)" {class: plane}
+    journal: Journal {class: plane}
+    db: SQLite (WAL) {class: store}
+
+    adapters -> orch: TaskContract
+    orch -> runner: dispatch wave
+    runner -> verify: ResultContract
+    verify -> journal: score + verdict
+    orch -> journal: decisions
+    journal -> db
+    orch -> db: state
+  }
+
+  workspace: "Workspace (/var/lib/mandat)" {
+    mirrors: Git mirror cache {class: store}
+    worktrees: "Per-task worktrees (sparse checkout)" {class: store}
+  }
+
+  cc: "Claude Code CLI (subprocess, per-role OS user)" {class: proc}
+
+  mandat.identity -> arc: "token via IMDS :40342"
+  mandat.runner -> cc: "spawn headless, stream-json"
+  cc -> workspace.worktrees: edits within remit
+  workspace.mirrors -> workspace.worktrees: "worktree add --reference"
+}
+
+owner -> ado: "idea, tag = consent, ratify status"
+owner -> vm.mandat.web: SSO review
+ado <-> vm.mandat.adapters: "poll + webhook, per-agent identity writes"
+jira <-> vm.mandat.adapters: adapter (later) {style.stroke-dash: 3}
+vm.arc -> entra: managed identity
+entra.ids -> ado: "scoped RBAC per role"
+cc -> claude_api: LLM calls
+cc -> ado: "git push branch, draft PR (agent identity token)"
+vm.mandat.orch -> teams: adaptive card notify
