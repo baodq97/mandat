@@ -41,6 +41,7 @@ A `PreToolUse` hook in `.claude/settings.json` runs `npx govkit audit-write` on 
 
 - Every governed doc requires front-matter `id, title, status, owner, date` (US adds `priority`); the filename must match the id. Every add or status change must update the matching `INDEX.md` row. The gate ignores `INDEX.md` and `_TEMPLATE.md`.
 - New docs start at the type's start status. **Never self-flip a status, self-assign an owner, or approve your own doc.** AI proposes; a human ratifies in-session; the flip lands in a separate accept commit citing that authorization. The repo dogfoods the product's own thesis (spec §4.4: a proposal never self-ratifies).
+- **Before proposing any status advance, red-team the doc**: an independent agent — never the doc's author, senior model tier — runs the spec-red-team pass (steelman → falsifiable "Fails if" findings → self-refutation → one kill criterion) and its brief goes to the owner together with the ratification request. Advisory by construction: keyed passes never enter CI, hooks, or exit codes, and the owner may advance with findings open.
 - Structure new docs to the eval rubric sections in `govkit.yml` (PRD: problem, persona, success metrics, scope; RFC: summary, alternatives with trade-offs, open questions, impact, decision; ADR: context, decision, consequences; US: acceptance criteria).
 
 ## Code policy (ADR-0002..0004)
