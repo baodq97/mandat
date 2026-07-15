@@ -176,8 +176,10 @@ managed-identity federated credential in prod).
     `AADSTS50057: The user account is disabled.` Revocation propagates within the token
     TTL. The agent user was re-enabled afterward (HTTP `204`), restoring the asset.
 
-Honest remainder: this proves read and comment under the agent user. Git-over-HTTPS
-carrying T3 and PR creation under the agent user are not yet exercised; both ride with S3.
+This proves read and comment under the agent user. Git-over-HTTPS carrying T3 and PR
+creation under the agent user rode with S3, which answered both yes on 2026-07-16: the
+agent user clones, pushes, and opens a PR from a clean sandbox under the same delegated
+token. See [S3](./S3-git-write-path.md).
 
 ## Fallback
 
@@ -223,6 +225,6 @@ immediately when any moves:
 Retest procedure: re-run step 6 verbatim against the kept agent identity asset and record
 the result the same way. The agent-user path needs no retest; it works today. The
 token-flow question (agent acting as its agent user) is now answered: round 3 proved the
-three-token chain mints a delegated agent-user token good for ADO read and comment. What
-still rides with S3 is git-over-HTTPS under that token and PR creation under the agent
-user.
+three-token chain mints a delegated agent-user token good for ADO read and comment.
+Git-over-HTTPS under that token and PR creation under the agent user were the S3 question,
+now answered yes (see [S3](./S3-git-write-path.md)).
