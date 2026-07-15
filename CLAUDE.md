@@ -56,6 +56,8 @@ The lead session model (Fable) guides, decides, and integrates — it never does
 
 - **Reusable role agents live in `.claude/agents/`** (`red-teamer`, `spec-drafter`, `gate-verifier`) — dispatch these instead of re-briefing `general-purpose` from scratch. New recurring role = new agent file, never a longer ad-hoc prompt. This is the dev-time mirror of the product's role plane: a role is config.
 - **Skills are two-tier.** Tier 1: small, dependency-free skills that do one job independently and load on demand (spec-red-team, spec-author, better-wording); agent definitions carry *hints* naming which Tier-1 skills to load, with the procedure embedded as fallback. Tier 2: orchestration — the lead composes Tier-1 workers through Workflow scripts (`.claude/workflows/`) or orchestrator skills. Tier-1 skills never depend on each other or on Tier 2; anything that coordinates is Tier 2 by definition.
+- **Least-privilege dispatch.** Send work to the narrowest registered agent that fits (`spec-drafter` for governed docs, `gate-verifier` for verification, `red-teamer` for a pre-flip review) — their tool sets are already scoped. Reach for `general-purpose` only when no specific agent fits; its all-tools grant invites scope creep. Every dispatch names its allowed files or paths so the agent cannot wander.
+- **Scope discipline for every subagent.** An agent does only the named task: no exploring beyond its files, no running skills or tools the task does not need, no reading a dependency's source to "understand" it. `govkit` is a black-box gate — run `npx govkit check` and read its output; never open its `node_modules` or lib. Unnecessary work is a defect, not diligence.
 
 ## Architecture (design-level)
 

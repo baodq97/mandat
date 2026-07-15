@@ -15,6 +15,12 @@ Format: `date | what escaped | where it should have been caught | lesson | encod
   doc's co-author was its only reader | the status-advance path | every status
   advance needs an independent red-team pass attached | CLAUDE.md governed-docs
   rule (commit b977f77)
+- 2026-07-15 | Doc-writing work was dispatched to general-purpose (all
+  tools) instead of the scoped spec-drafter agent, so a subagent wandered
+  into dependency internals it did not need; the owner caught the waste |
+  the dispatch step | dispatch the narrowest registered agent that fits and
+  name its allowed files; treat govkit as a black-box gate | CLAUDE.md
+  agent-orchestration rules (least-privilege dispatch, scope discipline)
 - 2026-07-15 | Spike S1 shipped with its second question marked "unreachable"
   while a GA Graph API (agentUser) could answer it; the owner's UI retest and
   prodding reopened it the same day and flipped that half of the verdict | the

@@ -1,7 +1,9 @@
 # S1: Agent identity in Azure DevOps
 
 Spike from design §11. Kill risk if this fails: falls back to a standard Entra service
-principal per role. Date: 2026-07-15. Status: answered, blocked (fallback active).
+principal per role. Date: 2026-07-15. Status: answered. ServiceIdentity direct path
+blocked (fallback active for that surface); the paired agent-user path is proven for Azure
+DevOps read and comment (round 3).
 
 All identifiers below are placeholders. Real tenant ID, org name, project name, and
 object IDs are operator-local (see the operator's private notes or memory, never
@@ -119,6 +121,64 @@ org cannot resolve — so whether any token path exists that lets the agent act 
 user is the follow-up question, and S3 will answer the interim path with the plain-SP
 asset.
 
+## Round 3: the agent user reaches the ADO API (same day)
+
+Round 2 posed the follow-up directly: tokens minted through the blueprint name the agent
+identity, which the org cannot resolve, so is there any token path that lets the agent act
+as its agent user against the ADO API? Round 3 answers yes for read and comment. The
+documented autonomous-agent three-token chain (blueprint → agent identity → agent user)
+mints a delegated token whose claims name the agent user, and the org accepts it because
+the agent user is an object it already resolves. Every call below ran live today, each
+recorded with its result.
+
+Two prerequisites had to exist before the chain resolved:
+
+- **Delegation grant.** `POST /v1.0/oauth2PermissionGrants`
+  `{ clientId: <agent-identity-id>, consentType: Principal, principalId: <agent-user-object-id>, resourceId: <ado-sp-object-id>, scope: user_impersonation }`
+  → HTTP `201`. This consent is what lets the agent identity act for the agent user on the
+  ADO resource; the third token leg draws on it.
+- **Project group membership.** The very first work-item GET returned HTTP `404` until the
+  agent user was added to the project's Contributors group through the ADO graph
+  memberships API. A permissions and membership gap, not an auth failure: the token was
+  valid, the user simply had no read on the project yet.
+
+The token chain, all three legs against
+`POST login.microsoftonline.com/<tenant>/oauth2/v2.0/token`:
+
+11. **T1, the blueprint acting for the agent identity.** `client_id=<blueprint-app-id>`,
+    `client_secret` (dev only; managed-identity FIC in prod),
+    `grant_type=client_credentials`, `scope=api://AzureADTokenExchange/.default`,
+    `fmi_path=<agent-identity-id>` → the blueprint token acting for the agent identity.
+12. **T2, the agent-identity federated-credential exchange.**
+    `client_id=<agent-identity-id>`, `grant_type=client_credentials`,
+    `client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer`,
+    `client_assertion=T1`, `scope=api://AzureADTokenExchange/.default` → the agent-identity
+    FIC exchange token.
+13. **T3, the delegated agent-user token.** `client_id=<agent-identity-id>`,
+    `grant_type=user_fic`, `client_assertion=T1`, `user_id=<agent-user-object-id>`,
+    `user_federated_identity_credential=T2`, `scope=<ado-app-id>/.default` → a delegated
+    token whose claims read `idtyp=user`, `upn=<agent-user-upn>`, `aud=<ado-app-id>`.
+
+With T3 in hand, the agent user reached the ADO API:
+
+14. **connectionData** authenticated as the agent user, the identity the token names.
+15. **Read.** GET the work item → HTTP `200` with full fields.
+16. **Comment.** POST a work-item comment → HTTP `200`, `createdBy` equal to the agent
+    user.
+
+So read and comment both succeed as the agent user, with no PAT and no password on the
+agent: the blueprint is the only credential holder (a client secret in dev, a
+managed-identity federated credential in prod).
+
+17. **Kill-criterion probe.** Disabling the agent user
+    (`PATCH /v1.0/users/<agent-user-object-id>` `{ accountEnabled: false }` → HTTP `204`)
+    and re-running the chain: T3 was refused with
+    `AADSTS50057: The user account is disabled.` Revocation propagates within the token
+    TTL. The agent user was re-enabled afterward (HTTP `204`), restoring the asset.
+
+Honest remainder: this proves read and comment under the agent user. Git-over-HTTPS
+carrying T3 and PR creation under the agent user are not yet exercised; both ride with S3.
+
 ## Fallback
 
 Per design §11, now active for API authentication: standard Entra service principal per
@@ -140,6 +200,11 @@ All objects are prefixed `mandat-spike-`.
 - The paired agent user (steps 8 to 10), entitled in the org on a Basic license, and the
   test work item assigned to it, kept as living evidence and as the attribution asset for
   later spikes.
+- The oauth2PermissionGrant delegating the agent user to the agent identity on the ADO
+  resource (`user_impersonation`), created HTTP `201` in round 3, kept as the consent that
+  makes the three-token chain resolve.
+- The agent user's Contributors membership in the project, kept so read and comment under
+  the delegated token keep working.
 
 ## Retest criteria
 
@@ -156,5 +221,8 @@ immediately when any moves:
 3. The Entra Agent ID "What's new" page naming Azure DevOps in its integration list.
 
 Retest procedure: re-run step 6 verbatim against the kept agent identity asset and record
-the result the same way. The agent-user path needs no retest; it works today. The open
-token-flow question (agent acting as its agent user) rides along with S3.
+the result the same way. The agent-user path needs no retest; it works today. The
+token-flow question (agent acting as its agent user) is now answered: round 3 proved the
+three-token chain mints a delegated agent-user token good for ADO read and comment. What
+still rides with S3 is git-over-HTTPS under that token and PR creation under the agent
+user.
