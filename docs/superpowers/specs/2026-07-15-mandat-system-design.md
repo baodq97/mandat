@@ -149,17 +149,20 @@ Install time is one download: a static binary (linux/amd64, linux/arm64) dropped
 `/usr/local/bin/mandat`. Setup time is one command:
 
 - `mandat init` runs an idempotent first-run wizard that collects: tracker kind + org +
-  project, auth mode (Arc managed identity or client certificate), Entra tenant +
-  blueprint + per-role agent identity ids, the repo registry (url, base branch, remit
-  defaults per repo), enabled roles + autonomy ceilings, and notification targets. It
+  project, auth mode (Arc managed identity or client certificate), the identity mode
+  (`service-principal`, `agent-user-pair`, or `agent-identity` per ADR-0005), Entra tenant
+  + blueprint + per-role agent identity ids (plus the paired agent user ids in
+  `agent-user-pair`), the repo registry (url, base branch, remit defaults per repo),
+  enabled roles + autonomy ceilings, and notification targets. It
   writes `/etc/mandat/config.yaml` (root-owned, reviewed like code), bootstraps the
   SQLite file at `/var/lib/mandat/mandat.db`, creates the per-role OS users, installs the
   hardened systemd unit, and registers the git credential helper.
 - `mandat doctor` verifies the installation end to end before first dispatch: tracker
-  reachability per identity, token acquisition through the configured auth mode, git
-  fetch against every registered repo, `claude` binary presence, and disk headroom. Every
-  check maps to one spike (S1-S4), so a green doctor run is the deployed proof of the
-  spike results.
+  reachability per identity, token acquisition through the configured auth mode and
+  identity mode (per-role service-principal client-credential, or the three-leg agent-user
+  delegated chain per ADR-0005), git fetch against every registered repo, `claude` binary
+  presence, and disk headroom. Every check maps to one spike (S1-S4), so a green doctor run
+  is the deployed proof of the spike results.
 - Re-running `mandat init` updates config in place and never destroys state. Upgrade =
   replace the binary and restart the unit; additive SQLite migrations run at boot.
 
