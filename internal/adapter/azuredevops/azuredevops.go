@@ -227,9 +227,9 @@ func (a *Adapter) workItemURL(workItemID string) string {
 
 // do issues one authorized ADO request. It mints a fresh token per call so the
 // credential stays short-lived and bound to the single operation (spec §4.2);
-// out, when non-nil, receives the decoded JSON body. A non-2xx status returns an
-// error carrying the status and a bounded slice of the response body for
-// diagnosis.
+// out, when non-nil, receives the decoded JSON body. A non-2xx status returns a
+// *APIError (reachable with errors.As) carrying the status and a bounded slice of
+// the response body for diagnosis.
 func (a *Adapter) do(ctx context.Context, method, endpoint, contentType string, body []byte, out any) error {
 	token, err := a.tokens.Token(ctx, a.role)
 	if err != nil {
@@ -261,7 +261,7 @@ func (a *Adapter) do(ctx context.Context, method, endpoint, contentType string, 
 		return fmt.Errorf("read %s %s response: %w", method, endpoint, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("%s %s: status %d: %s", method, endpoint, resp.StatusCode, strings.TrimSpace(string(respBody)))
+		return fmt.Errorf("%s %s: %w", method, endpoint, &APIError{Status: resp.StatusCode, Body: strings.TrimSpace(string(respBody))})
 	}
 	if out != nil {
 		if err := json.Unmarshal(respBody, out); err != nil {
