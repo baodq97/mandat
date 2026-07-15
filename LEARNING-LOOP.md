@@ -15,3 +15,10 @@ Format: `date | what escaped | where it should have been caught | lesson | encod
   doc's co-author was its only reader | the status-advance path | every status
   advance needs an independent red-team pass attached | CLAUDE.md governed-docs
   rule (commit b977f77)
+- 2026-07-15 | Spike S1 shipped with its second question marked "unreachable"
+  while a GA Graph API (agentUser) could answer it; the owner's UI retest and
+  prodding reopened it the same day and flipped that half of the verdict | the
+  spike's own completeness check before closing | before closing any spike
+  question as unanswerable, enumerate documented alternative paths for each
+  sub-question separately — a blocked path is not a blocked question | spike
+  report round-2 section; this entry

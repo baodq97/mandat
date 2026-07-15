@@ -75,8 +75,8 @@ ID](https://learn.microsoft.com/entra/agent-id/agent-blueprint)) describes creat
 governance inside Entra with no mention of Azure DevOps as a consuming surface. A
 Microsoft Q&A answer separately states that Azure DevOps has only limited native support
 for Entra workload identities in service-to-service scenarios, consistent with what step 6
-shows. The work-item-assignment half of S1 is therefore unreachable and unanswered until
-the subtype is accepted.
+shows. The work-item-assignment half of S1 initially looked unreachable behind the same
+wall; the round-2 evidence below answered it the same day through the paired agent user.
 
 Post-spike inspection pins where the rejection lives. The blueprint is an application
 subclass (`@odata.type: #microsoft.graph.agentIdentityBlueprint`; credential APIs behave
@@ -88,12 +88,46 @@ does not. The blueprint principal itself would likely pass the Users hub, but as
 shared principal for every role it would defeat per-role separation, so it is not a usable
 path.
 
+## Round 2 evidence: the paired agent user (same day)
+
+The owner's retest through the web UI surfaced a second failure signature for the agent
+identity: `VS860016: Could not find subject ... in the backing domain` from the identity
+picker, while the entitlement API still returned VS403283 and Graph confirmed the
+principal alive and enabled. Two surfaces, one root cause: the org's identity-resolution
+layer does not see `ServiceIdentity` principals at all.
+
+That reopened the assignment half through the object the design already planned for
+(§4.1): the paired agent user.
+
+8. Agent user created: `POST /v1.0/users/microsoft.graph.agentUser` (a GA v1.0 endpoint)
+   with `identityParentId` bound to the spike agent identity and a UPN on the tenant's
+   default verified domain → HTTP 201, `@odata.type #microsoft.graph.agentUser`. The
+   operator token again lacked the dedicated scope (`AgentIdUser.ReadWrite.All`); Global
+   Administrator plus `User.ReadWrite.All` sufficed.
+9. Org entitlement via the UserEntitlements API succeeded → `isSuccess: true`, Basic
+   license, AAD descriptor issued. Gotcha: identifying the user by `originId` fails with
+   "The Id, OriginId, or User.PrincipalName must be set"; identify by `principalName`.
+10. A test work item created with `System.AssignedTo` set to the agent user's UPN →
+    HTTP 200, the assignment sticks and renders as a normal assignee.
+
+The verdict therefore splits cleanly. The service-principal half stands: `ServiceIdentity`
+principals cannot enter the org, so an agent cannot yet authenticate to Azure DevOps APIs
+under its agent identity. The assignment half flips to yes: a paired agent user is a
+first-class org member and a valid work-item assignee today. The remaining unknown is the
+token flow — tokens minted through the blueprint identify the agent identity, which the
+org cannot resolve — so whether any token path exists that lets the agent act as its agent
+user is the follow-up question, and S3 will answer the interim path with the plain-SP
+asset.
+
 ## Fallback
 
-Per design §11, now active: standard Entra service principal per role. The architecture is
-unchanged; sponsor and agent-native audit trails are deferred until Azure DevOps accepts
-the subtype. Recorded as [ADR-0005](../adr/ADR-0005-identity-mode-service-principal.md)
-(proposed).
+Per design §11, now active for API authentication: standard Entra service principal per
+role. The architecture is unchanged; sponsor accountability and agent-native audit for
+tracker writes are deferred until Azure DevOps accepts the subtype. Assignment and
+attribution, however, need not wait: the paired agent user already works, and whether the
+MVP provisions agent-identity/agent-user pairs alongside the per-role service principals
+is an owner decision at ADR-0005 ratification. Recorded as
+[ADR-0005](../adr/ADR-0005-identity-mode-service-principal.md) (proposed).
 
 ## Assets kept
 
@@ -103,9 +137,24 @@ All objects are prefixed `mandat-spike-`.
   retest asset for step 6.
 - The plain service principal from the control (step 7), already entitled in the org.
   It becomes the S3 asset: git over HTTPS authenticated with an Entra token.
+- The paired agent user (steps 8 to 10), entitled in the org on a Basic license, and the
+  test work item assigned to it, kept as living evidence and as the attribution asset for
+  later spikes.
 
 ## Retest criteria
 
-Retest monthly, or immediately when Azure DevOps release notes mention agent identity or
-Agent ID support. Retest procedure: re-run step 6 verbatim against the kept agent identity
-asset and record the result the same way.
+A July 2026 research sweep found no roadmap item, no preview flag, no community thread,
+and no Microsoft-authored mention of Azure DevOps as an Agent ID consuming surface; both
+error codes are absent from every troubleshooting table (sibling codes are documented, so
+the absence is signal). Quarterly re-check of three deterministic doc surfaces, retest
+immediately when any moves:
+
+1. The Azure DevOps roadmap initiative "Minimizing the risks associated with credential
+   theft" (the stated home for deeper Entra integration) gaining an agent-identity item.
+2. The service-principals-and-managed-identities doc adding a `ServiceIdentity` row to its
+   supported types.
+3. The Entra Agent ID "What's new" page naming Azure DevOps in its integration list.
+
+Retest procedure: re-run step 6 verbatim against the kept agent identity asset and record
+the result the same way. The agent-user path needs no retest; it works today. The open
+token-flow question (agent acting as its agent user) rides along with S3.
