@@ -7,3 +7,4 @@
 | [ADR-0003](ADR-0003-comments-policy.md) | Comments policy — self-documenting code, comments only for what code cannot say | accepted | baodq97 | 2026-07-15 |
 | [ADR-0004](ADR-0004-minimal-implement-max-value.md) | Implementation stance — minimal implement, maximum value | accepted | baodq97 | 2026-07-15 |
 | [ADR-0005](ADR-0005-identity-mode-service-principal.md) | Identity mode — agent-user pair where proven, service principal as fallback | accepted | baodq97 | 2026-07-15 |
+| [ADR-0006](ADR-0006-runner-subprocess-contract.md) | Runner subprocess contract — Claude Code CLI headless over the Agent SDK | proposed | TBD | 2026-07-16 |
