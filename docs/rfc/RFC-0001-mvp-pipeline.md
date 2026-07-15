@@ -1,8 +1,8 @@
 ---
 id: RFC-0001
 title: MVP pipeline — one ADO work item to a draft PR under a Dev RoleAgent mandate
-status: draft
-owner: TBD
+status: accepted
+owner: baodq97
 date: 2026-07-16
 ---
 
