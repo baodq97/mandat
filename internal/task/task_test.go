@@ -98,6 +98,8 @@ func TestParse_RejectsInvalid(t *testing.T) {
 		{name: "missing remit.base_branch", mutate: func(tc *TaskContract) { tc.Remit.BaseBranch = "" }, wantField: "remit.base_branch"},
 		{name: "empty remit.paths", mutate: func(tc *TaskContract) { tc.Remit.Paths = nil }, wantField: "remit.paths"},
 		{name: "empty remit.paths entry", mutate: func(tc *TaskContract) { tc.Remit.Paths = []string{""} }, wantField: "remit.paths[0]"},
+		{name: "absolute remit.paths entry", mutate: func(tc *TaskContract) { tc.Remit.Paths = []string{"/etc/passwd"} }, wantField: "remit.paths[0]"},
+		{name: "parent-traversal remit.paths entry", mutate: func(tc *TaskContract) { tc.Remit.Paths = []string{"internal/../../etc/passwd"} }, wantField: "remit.paths[0]"},
 		{name: "missing assigned_to", mutate: func(tc *TaskContract) { tc.AssignedTo = "" }, wantField: "assigned_to"},
 		{name: "wrong schema_version", mutate: func(tc *TaskContract) { tc.SchemaVersion = 2 }, wantField: "schema_version"},
 	}
@@ -121,6 +123,16 @@ func TestParse_RejectsInvalid(t *testing.T) {
 				t.Errorf("ValidationErrors = %v, want one naming field %q", verrs, tt.wantField)
 			}
 		})
+	}
+}
+
+func TestValidate_AcceptsValidRemitPaths(t *testing.T) {
+	t.Parallel()
+
+	tc := validTask()
+	tc.Remit.Paths = []string{"go.mod", "internal/task", "cmd/mandat/serve.go"}
+	if err := tc.Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want nil", err)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -52,13 +53,17 @@ const (
 	actProbePRExists = "probe_pr_exists"
 )
 
-// The pipeline plane seams runTask keys off, each narrowed to the one method the
+// The pipeline plane seams runTask keys off, each narrowed to the methods the
 // composition needs so the walking-skeleton test injects doubles (RFC-0001 §9): a
-// recorded-ADO fixture behind taskPoller and prForge, a fake claude behind
+// recorded-ADO fixture behind taskTracker and prForge, a fake claude behind
 // taskRunner, and a Reviewer-identity fake behind the verifier's own probe.
+// taskTracker mirrors tracker.Tracker in full (not just Poll): runTask also
+// writes tracker lifecycle feedback back onto the source work item (US-0018).
 type (
-	taskPoller interface {
+	taskTracker interface {
 		Poll(ctx context.Context) ([]task.TaskContract, error)
+		Comment(ctx context.Context, workItemID, text string) error
+		ApplyStatus(ctx context.Context, workItemID, status string) error
 	}
 	prForge interface {
 		CreatePR(ctx context.Context, in azuredevops.CreatePRInput) (azuredevops.CreatePRResult, error)
@@ -80,7 +85,7 @@ type (
 // against a local bare git origin rather than a stub.
 type serveDeps struct {
 	Store     *journal.Store
-	Tracker   taskPoller
+	Tracker   taskTracker
 	Forge     prForge
 	Runner    taskRunner
 	Verifier  runVerifier
@@ -88,6 +93,10 @@ type serveDeps struct {
 
 	Role             role.Role
 	ReviewerIdentity string
+
+	// InProgressState is the tracker.states.in_progress config value (US-0018):
+	// the work-item state serve applies on dispatch, before the runner spawns.
+	InProgressState string
 
 	// RepoURL, Gates, and MirrorDir resolve per-repo installation config the task
 	// contract does not carry: the git origin the worktree mirrors, the gate command
@@ -133,13 +142,22 @@ func runTask(ctx context.Context, d serveDeps, tc task.TaskContract) (orchestrat
 	// retry (spec §4.5, RFC-0001 AC-18).
 	ws, err := d.provision(ctx, &tc)
 	if err != nil {
-		return d.transition(ctx, &tc, state, orchestrator.EventSetupFailed, "",
+		to, tErr := d.transition(ctx, &tc, state, orchestrator.EventSetupFailed, "",
 			detailJSON(map[string]any{"error": err.Error()}))
+		d.postHoldComment(ctx, &tc, err.Error())
+		return to, tErr
 	}
 	state, err = d.transition(ctx, &tc, state, orchestrator.EventClaimOK, "", nil)
 	if err != nil {
 		return state, err
 	}
+
+	// Tracker lifecycle feedback: before the runner spawns, set the work item to
+	// the configured in-progress state and name the task and acting role in a
+	// comment (US-0018). Best-effort — a failed write logs a warning and never
+	// holds up the run.
+	d.applyTrackerStatus(ctx, &tc, d.InProgressState)
+	d.postTrackerComment(ctx, &tc, fmt.Sprintf("mandat dispatched task %s to the %s role.", tc.ID, d.Role.Name))
 
 	// run the agent once (ADR-0006). The runner derives one event from the
 	// schema-validated ResultContract file, never from stream-json prose.
@@ -156,7 +174,9 @@ func runTask(ctx context.Context, d serveDeps, tc task.TaskContract) (orchestrat
 		if out.Result != nil && out.Result.Reason != "" {
 			detail = map[string]any{"reason": out.Result.Reason}
 		}
-		return d.transition(ctx, &tc, state, out.Event, out.RunID, detailJSON(detail))
+		to, tErr := d.transition(ctx, &tc, state, out.Event, out.RunID, detailJSON(detail))
+		d.postHoldComment(ctx, &tc, runReason(out))
+		return to, tErr
 	}
 
 	// The runner reported a valid completed ResultContract. Open the draft PR under
@@ -164,12 +184,17 @@ func runTask(ctx context.Context, d serveDeps, tc task.TaskContract) (orchestrat
 	// probe has a real PR to confirm: the fake claude self-reports a pr_url in its
 	// artifact but opens nothing, so the composition root is what actually opens the
 	// PR here (the productionized runner opens it in-band; this seam stays the same).
+	// WorkItemID passes the source work item so ADO links the PR at create time: this
+	// populates the PR's own work-item refs AND writes the ArtifactLink relation back
+	// onto the work item (verified live against ADO), which is what makes the work
+	// item's UI show the PR without a second round-trip.
 	pr, err := d.Forge.CreatePR(ctx, azuredevops.CreatePRInput{
 		Repo:        tc.Remit.Repo,
 		Branch:      ws.Branch,
 		BaseBranch:  tc.Remit.BaseBranch,
 		Title:       tc.Title,
 		Description: prDescription(&tc),
+		WorkItemID:  tc.TrackerRef.WorkItemID,
 	})
 	if err != nil {
 		return state, fmt.Errorf("serve: open draft PR for task %s: %w", tc.ID, err)
@@ -178,6 +203,7 @@ func runTask(ctx context.Context, d serveDeps, tc task.TaskContract) (orchestrat
 		detailJSON(map[string]any{"pr_url": pr.URL, "pr_id": pr.ID, "created_by": pr.CreatedBy})); err != nil {
 		return state, err
 	}
+	d.postTrackerComment(ctx, &tc, fmt.Sprintf("mandat opened a draft PR for task %s: %s", tc.ID, pr.URL))
 
 	// verify: gate re-run + diff-inside-remit + Reviewer-identity PR probe, all in
 	// the verifier's own trusted context, never trusting the agent's self-report
@@ -204,8 +230,10 @@ func runTask(ctx context.Context, d serveDeps, tc task.TaskContract) (orchestrat
 	// runner already reported completed (RFC-0001 state machine: result_ok is
 	// conditioned on gates green AND diff-in-remit AND the probe confirming).
 	if verdict.Event != orchestrator.EventResultOK {
-		return d.transition(ctx, &tc, state, verdict.Event, out.RunID,
+		to, tErr := d.transition(ctx, &tc, state, verdict.Event, out.RunID,
 			detailJSON(map[string]any{"check": string(verdict.Failed), "detail": verdict.Detail}))
+		d.postHoldComment(ctx, &tc, verdict.Detail)
+		return to, tErr
 	}
 	if err := d.journalAct(ctx, &tc, out.RunID, d.ReviewerIdentity, actProbePRExists,
 		detailJSON(map[string]any{"pr_url": verdict.PR.URL, "created_by": verdict.PR.CreatedBy})); err != nil {
@@ -303,6 +331,41 @@ func (d serveDeps) writeEvent(ctx context.Context, e journal.JournalEvent) error
 		return fmt.Errorf("serve: journal %q for task %s: %w", e.Act, e.TaskID, err)
 	}
 	return nil
+}
+
+// applyTrackerStatus sets the source work item's tracker state. Tracker feedback
+// is best-effort (US-0018): a failed write logs a warning and never fails the
+// task or changes its pipeline outcome, since the journal (not the tracker) is
+// the pipeline's own source of truth.
+func (d serveDeps) applyTrackerStatus(ctx context.Context, tc *task.TaskContract, status string) {
+	if err := d.Tracker.ApplyStatus(ctx, tc.TrackerRef.WorkItemID, status); err != nil {
+		slog.Warn("serve: tracker ApplyStatus failed", "task", tc.ID, "work_item_id", tc.TrackerRef.WorkItemID, "status", status, "error", err)
+	}
+}
+
+// postTrackerComment posts a comment onto the source work item. Best-effort, like
+// applyTrackerStatus: a failed post logs a warning and never fails the task.
+func (d serveDeps) postTrackerComment(ctx context.Context, tc *task.TaskContract, text string) {
+	if err := d.Tracker.Comment(ctx, tc.TrackerRef.WorkItemID, text); err != nil {
+		slog.Warn("serve: tracker Comment failed", "task", tc.ID, "work_item_id", tc.TrackerRef.WorkItemID, "error", err)
+	}
+}
+
+// postHoldComment names the reason a run held for a human — a gate detail, a
+// remit violation, a probe finding, or the runner's own reason — on the source
+// work item (US-0018).
+func (d serveDeps) postHoldComment(ctx context.Context, tc *task.TaskContract, reason string) {
+	d.postTrackerComment(ctx, tc, fmt.Sprintf("mandat held task %s for a human: %s", tc.ID, reason))
+}
+
+// runReason resolves the reason a non-result_ok run holds for a human: the
+// runner-reported ResultContract reason when one was produced, or a fallback
+// noting no valid ResultContract landed at all.
+func runReason(out runner.Outcome) string {
+	if out.Result != nil && out.Result.Reason != "" {
+		return out.Result.Reason
+	}
+	return "the run did not produce a valid ResultContract"
 }
 
 // detailJSON encodes a journal detail payload, mapping an empty payload to a nil
@@ -444,6 +507,7 @@ func buildServeDeps(cfg *config.Config, store *journal.Store, roleName string, m
 		Provision:           workspace.Provision,
 		Role:                r,
 		ReviewerIdentity:    reviewer,
+		InProgressState:     cfg.Tracker.States.InProgress,
 		RepoURL:             repoURLResolver(cfg),
 		Gates:               gatesResolver(cfg),
 		MirrorDir:           func(repo string) string { return filepath.Join(mandatStateRoot, "mirror", repo+".git") },
