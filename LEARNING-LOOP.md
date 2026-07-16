@@ -83,3 +83,13 @@ Format: `date | what escaped | where it should have been caught | lesson | encod
   sending; an agent that halts on a false premise is doing its job | this
   entry; the halting behavior itself is the swe-flow implementer contract
   working as designed
+- 2026-07-16 | A hand-rolled requeue (delete store row + rm worktree dir)
+  missed the mirror's worktree metadata and the stale task branch, so the
+  re-dispatch died at setup two seconds in (worktree add -b on an existing
+  branch) and the actual fix under test (a raised budget cap) never ran |
+  the ops runbook - a multi-step manual recovery encoded only in an agent's
+  memory | recovery procedures that touch more than one store belong in the
+  binary as a command (mandat requeue), not in a runbook; until then the
+  runbook lists ALL four steps: store row, worktree dir, worktree prune,
+  branch -D | board item #25 (requeue command) carries the evidence; this
+  entry
