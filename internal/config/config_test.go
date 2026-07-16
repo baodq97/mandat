@@ -75,8 +75,13 @@ func TestLoad_ValidRoundTrips(t *testing.T) {
 	}
 
 	want := &Config{
-		Tracker: TrackerConfig{Kind: TrackerAzureDevOps, Org: "baodo0220", Project: "mandat-dogfood"},
-		Auth:    AuthConfig{Mode: AuthArcManagedIdentity},
+		Tracker: TrackerConfig{
+			Kind:    TrackerAzureDevOps,
+			Org:     "baodo0220",
+			Project: "mandat-dogfood",
+			States:  TrackerStatesConfig{InProgress: defaultInProgressState},
+		},
+		Auth: AuthConfig{Mode: AuthArcManagedIdentity},
 		Entra: EntraConfig{
 			Tenant:       "d1a7b725-aaaa-bbbb-cccc-dddddddddddd",
 			Blueprint:    "blueprint-01",
@@ -138,6 +143,42 @@ func TestConfig_RemitDefaultsFor(t *testing.T) {
 	if _, err := cfg.RemitDefaultsFor("unregistered"); err == nil {
 		t.Error(`RemitDefaultsFor("unregistered") error = nil, want a not-in-registry error`)
 	}
+}
+
+// TestLoad_TrackerStatesInProgress covers tracker.states.in_progress (US-0018):
+// an omitted field resolves to the "Doing" default, and an explicit value
+// round-trips unchanged; both cases parse without a validation error.
+func TestLoad_TrackerStatesInProgress(t *testing.T) {
+	t.Parallel()
+
+	t.Run("defaults to Doing when unset", func(t *testing.T) {
+		t.Parallel()
+
+		path := writeConfig(t, baseYAML)
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load(%q) error = %v, want nil", path, err)
+		}
+		if got := cfg.Tracker.States.InProgress; got != "Doing" {
+			t.Errorf("Tracker.States.InProgress = %q, want %q", got, "Doing")
+		}
+	})
+
+	t.Run("explicit value round-trips", func(t *testing.T) {
+		t.Parallel()
+
+		path := writeConfig(t, strings.Replace(baseYAML,
+			"tracker:\n  kind: azure-devops\n  org: baodo0220\n  project: mandat-dogfood\n",
+			"tracker:\n  kind: azure-devops\n  org: baodo0220\n  project: mandat-dogfood\n  states:\n    in_progress: In Development\n",
+			1))
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load(%q) error = %v, want nil", path, err)
+		}
+		if got := cfg.Tracker.States.InProgress; got != "In Development" {
+			t.Errorf("Tracker.States.InProgress = %q, want %q", got, "In Development")
+		}
+	})
 }
 
 // baseYAML is a minimal config that passes validation on its own; every
