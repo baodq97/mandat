@@ -457,6 +457,8 @@ func prDescription(tc *task.TaskContract) string {
 // loops, running each polled TaskContract through runTask. It is the thin
 // real-deps wrapper around the testable runTask; the walking-skeleton proof lives at
 // runTask with the §9 doubles, not here, because this path needs live ADO/Entra.
+// --once runs the same dispatchCycle exactly once and returns instead of entering
+// the ticker loop, for pilot ops ("launch, watch, pkill" friction, split from #25).
 func serve(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -465,6 +467,7 @@ func serve(args []string, stdout, stderr io.Writer) int {
 	roleName := fs.String("role", "dev", "the RoleAgent to dispatch (MVP skeleton: dev)")
 	maxBudget := fs.Float64("max-budget-usd", defaultMaxBudgetUSD, "per-run cost ceiling passed to the runner")
 	interval := fs.Duration("poll-interval", defaultPollInterval, "WIQL poll interval")
+	once := fs.Bool("once", false, "run exactly one poll/dispatch cycle and exit, instead of looping")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -491,7 +494,21 @@ func serve(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	ticker := time.NewTicker(*interval)
+	return runDispatchLoop(ctx, deps, stdout, stderr, *once, *interval)
+}
+
+// runDispatchLoop runs dispatchCycle once when once is true, exiting 0
+// afterwards instead of entering the ticker loop (pilot ops friction, split
+// from #25); otherwise it is serve's unchanged poll/dispatch/wait loop. Both
+// paths share the same dispatchCycle call, so --once gets the same
+// drain-per-cycle semantics as the daemon path.
+func runDispatchLoop(ctx context.Context, deps serveDeps, stdout, stderr io.Writer, once bool, interval time.Duration) int {
+	if once {
+		dispatchCycle(ctx, deps, stdout, stderr)
+		return 0
+	}
+
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		dispatchCycle(ctx, deps, stdout, stderr)

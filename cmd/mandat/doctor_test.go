@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/baodq97/mandat/internal/config"
 )
 
 func TestParseVersion(t *testing.T) {
@@ -124,6 +126,66 @@ func TestRunChecks_ExitCodeAndTable(t *testing.T) {
 				if !strings.Contains(out.String(), row) {
 					t.Errorf("table = %q, want it to contain %q", out.String(), row)
 				}
+			}
+		})
+	}
+}
+
+// TestReviewerIdentityCheck proves the three outcomes: PASS when a reviewer role
+// has a UPN distinct from every other role, WARN (not FAIL) when no reviewer role
+// is configured, and FAIL when the reviewer's UPN collides with another role's
+// (writer != scorer, RFC-0001 AC-27).
+func TestReviewerIdentityCheck(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		roles      map[string]config.RoleConfig
+		wantOK     bool
+		wantReq    bool
+		wantDetail string
+	}{
+		{
+			name: "pass: reviewer distinct from dev",
+			roles: map[string]config.RoleConfig{
+				"dev":      {AgentUserName: "dev-agent@baodo0220.onmicrosoft.com"},
+				"reviewer": {AgentUserName: "reviewer-agent@baodo0220.onmicrosoft.com"},
+			},
+			wantOK:  true,
+			wantReq: true,
+		},
+		{
+			name: "warn: no reviewer role configured",
+			roles: map[string]config.RoleConfig{
+				"dev": {AgentUserName: "dev-agent@baodo0220.onmicrosoft.com"},
+			},
+			wantOK:     false,
+			wantReq:    false,
+			wantDetail: "verification will hold every task at the probe",
+		},
+		{
+			name: "fail: reviewer UPN equals dev UPN",
+			roles: map[string]config.RoleConfig{
+				"dev":      {AgentUserName: "shared-agent@baodo0220.onmicrosoft.com"},
+				"reviewer": {AgentUserName: "shared-agent@baodo0220.onmicrosoft.com"},
+			},
+			wantOK:     false,
+			wantReq:    true,
+			wantDetail: "reviewer and dev share agent_user_name",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := &config.Config{Roles: tc.roles}
+			r := reviewerIdentityCheck(cfg)
+			if r.ok != tc.wantOK {
+				t.Errorf("reviewerIdentityCheck() ok = %v, want %v (detail: %s)", r.ok, tc.wantOK, r.detail)
+			}
+			if r.required != tc.wantReq {
+				t.Errorf("reviewerIdentityCheck() required = %v, want %v", r.required, tc.wantReq)
+			}
+			if tc.wantDetail != "" && !strings.Contains(r.detail, tc.wantDetail) {
+				t.Errorf("detail = %q, want it to contain %q", r.detail, tc.wantDetail)
 			}
 		})
 	}
