@@ -146,7 +146,7 @@ func TestConfig_RemitDefaultsFor(t *testing.T) {
 	}
 }
 
-// TestLoad_TrackerStatesInProgress covers tracker.states.in_progress (US-0018):
+// TestLoad_TrackerStatesInProgress covers tracker.states.in_progress (US-0011):
 // an omitted field resolves to the "Doing" default, and an explicit value
 // round-trips unchanged; both cases parse without a validation error.
 func TestLoad_TrackerStatesInProgress(t *testing.T) {

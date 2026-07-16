@@ -74,7 +74,7 @@ const (
 )
 
 // defaultInProgressState is what tracker.states.in_progress resolves to when
-// config.yaml omits it (US-0018): the work-item state serve applies on
+// config.yaml omits it (US-0011): the work-item state serve applies on
 // dispatch, before the runner spawns.
 const defaultInProgressState = "Doing"
 
@@ -83,7 +83,7 @@ const defaultInProgressState = "Doing"
 const defaultPoolSize = 1
 
 // TrackerStatesConfig names the work-item states serve writes back onto the
-// source work item as a run's lifecycle advances (US-0018). It carries no
+// source work item as a run's lifecycle advances (US-0011). It carries no
 // done/completed state: mandat never writes one (RFC-0001 §Human plane —
 // ratification is a human action, not something the pipeline sets).
 type TrackerStatesConfig struct {

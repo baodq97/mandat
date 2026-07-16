@@ -55,7 +55,10 @@ visible.
 
 - [ ] AC-11.1 On dispatch of a TaskContract, before the runner spawns, observe `serve`
       calls `ApplyStatus` with the configured in-progress state and `Comment` with a
-      message naming the run id and the acting RoleAgent (RFC-0001 §4.2).
+      message naming the task id and the acting RoleAgent (RFC-0001 §4.2). (Corrected
+      from "run id" at the done-flip red-team pass: the run id is minted by the runner,
+      which starts after this comment posts, so it cannot be named at that seam; the
+      task id is the board-correlating key.)
 - [ ] AC-11.2 When `serve` opens the draft PR, observe the PR carries a work-item link
       (the ADO PR is created with a work-item ref, so the board shows it under
       Development/links) and observe `serve` posts a comment carrying the PR URL.
@@ -70,9 +73,13 @@ visible.
       writes a done or completed state to any work item; `ApplyStatus` is invoked only
       with the configured in-progress value.
 - [ ] AC-11.6 Given a fixture where `Comment` or `ApplyStatus` returns an error, observe
-      `runTask` journals it as a warning and continues to the next pipeline step with no
+      `runTask` logs it as a warning and continues to the next pipeline step with no
       task failure and no retry of the tracker write (design spec §8, "every external
-      write is best-effort with logged degradation, except gates").
+      write is best-effort with logged degradation, except gates"). (Corrected from
+      "journals" at the done-flip red-team pass: the shipped degradation signal is the
+      process log, not a journal row; recording tracker-write degradations in the
+      append-only journal is tracked as its own backlog item, not silently implied
+      here.)
 - [ ] AC-11.7 Given a fixture ADO server recording the bearer token on every tracker
       write in this story (state, comment, PR link), observe every one carries the
       acting RoleAgent's delegated token, not a shared or service token (RFC-0001 §4.2,

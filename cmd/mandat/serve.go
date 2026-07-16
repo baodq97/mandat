@@ -61,7 +61,7 @@ const (
 // recorded-ADO fixture behind taskTracker and prForge, a fake claude behind
 // taskRunner, and a Reviewer-identity fake behind the verifier's own probe.
 // taskTracker mirrors tracker.Tracker in full (not just Poll): runTask also
-// writes tracker lifecycle feedback back onto the source work item (US-0018).
+// writes tracker lifecycle feedback back onto the source work item (US-0011).
 type (
 	taskTracker interface {
 		Poll(ctx context.Context) ([]task.TaskContract, error)
@@ -97,7 +97,7 @@ type serveDeps struct {
 	Role             role.Role
 	ReviewerIdentity string
 
-	// InProgressState is the tracker.states.in_progress config value (US-0018):
+	// InProgressState is the tracker.states.in_progress config value (US-0011):
 	// the work-item state serve applies on dispatch, before the runner spawns.
 	InProgressState string
 
@@ -177,7 +177,7 @@ func runTask(ctx context.Context, d serveDeps, tc task.TaskContract) (orchestrat
 
 	// Tracker lifecycle feedback: before the runner spawns, set the work item to
 	// the configured in-progress state and name the task and acting role in a
-	// comment (US-0018). Best-effort — a failed write logs a warning and never
+	// comment (US-0011). Best-effort — a failed write logs a warning and never
 	// holds up the run.
 	d.applyTrackerStatus(ctx, &tc, d.InProgressState)
 	d.postTrackerComment(ctx, &tc, fmt.Sprintf("mandat dispatched task %s to the %s role.", tc.ID, d.Role.Name))
@@ -360,7 +360,7 @@ func (d serveDeps) transition(ctx context.Context, tc *task.TaskContract, from o
 // holdForHuman transitions the task to a needs-human state and posts the
 // reason as a best-effort tracker comment. Every needs-human hold in runTask
 // routes through this one method so a future hold path cannot forget the
-// reason comment (US-0018).
+// reason comment (US-0011).
 func (d serveDeps) holdForHuman(ctx context.Context, tc *task.TaskContract, from orchestrator.State, event orchestrator.Event, runID string, detail []byte, reason string) (orchestrator.State, error) {
 	to, err := d.transition(ctx, tc, from, event, runID, detail)
 	d.postHoldComment(ctx, tc, reason)
@@ -401,7 +401,7 @@ func (d serveDeps) writeEvent(ctx context.Context, e journal.JournalEvent) error
 }
 
 // applyTrackerStatus sets the source work item's tracker state. Tracker feedback
-// is best-effort (US-0018): a failed write logs a warning and never fails the
+// is best-effort (US-0011): a failed write logs a warning and never fails the
 // task or changes its pipeline outcome, since the journal (not the tracker) is
 // the pipeline's own source of truth.
 func (d serveDeps) applyTrackerStatus(ctx context.Context, tc *task.TaskContract, status string) {
@@ -420,7 +420,7 @@ func (d serveDeps) postTrackerComment(ctx context.Context, tc *task.TaskContract
 
 // postHoldComment names the reason a run held for a human — a gate detail, a
 // remit violation, a probe finding, or the runner's own reason — on the source
-// work item (US-0018).
+// work item (US-0011).
 func (d serveDeps) postHoldComment(ctx context.Context, tc *task.TaskContract, reason string) {
 	d.postTrackerComment(ctx, tc, fmt.Sprintf("mandat held task %s for a human: %s", tc.ID, reason))
 }

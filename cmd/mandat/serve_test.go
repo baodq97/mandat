@@ -274,6 +274,31 @@ func TestWalkingSkeleton_TrackerFeedbackBestEffort(t *testing.T) {
 	}
 }
 
+// TestWalkingSkeleton_ConfiguredInProgressState is a red-team kill criterion for
+// US-0011: InProgressState must be config, not code. newSkeleton's fixture
+// hardcodes "Doing"; this test overrides deps.InProgressState to "Active" after
+// construction (mirrors the Verifier swap in
+// TestWalkingSkeleton_VerifyOperationalErrorHolds) and runs the same happy path,
+// so a build that ignored the field and PATCHed a literal "Doing" would fail
+// here even though every other skeleton test still passes.
+func TestWalkingSkeleton_ConfiguredInProgressState(t *testing.T) {
+	deps, ado, tc := newSkeleton(t, "completed")
+	deps.InProgressState = "Active"
+	ctx := context.Background()
+
+	state, err := runTask(ctx, deps, tc)
+	if err != nil {
+		t.Fatalf("runTask() error = %v", err)
+	}
+	if state != orchestrator.StateInReview {
+		t.Fatalf("final state = %q, want %q", state, orchestrator.StateInReview)
+	}
+
+	if statuses := ado.statusCalls(); len(statuses) != 1 || !strings.Contains(statuses[0], "Active") {
+		t.Errorf("ApplyStatus calls = %v, want exactly one call setting the configured state %q", statuses, "Active")
+	}
+}
+
 // TestSelectSpawner_PilotEscapeHatch proves the pilot toggle: MANDAT_DIRECT_SPAWN
 // (non-empty) swaps in the same-user DirectSpawner for pilot/dev VMs without root,
 // and its absence keeps the OS-user isolation DefaultSpawner (spec §4.5). The two
@@ -522,6 +547,17 @@ func TestWalkingSkeleton_ReviewerProbe_CreatedByMismatchHolds(t *testing.T) {
 	}
 	if findAct(events, actProbePRExists) != nil {
 		t.Error("probe_pr_exists was journaled for a createdBy mismatch")
+	}
+
+	// The hold comment carries the verdict's own detail text, not a generic
+	// message, the same as the runner-reason (needs-human) and verify-error
+	// holds already prove (US-0011, F4).
+	comments := ado.commentCalls()
+	if len(comments) != 3 {
+		t.Fatalf("Comment calls = %v, want 3 (dispatch + PR opened + probe-mismatch hold)", comments)
+	}
+	if !strings.Contains(comments[2], "held task") || !strings.Contains(comments[2], "createdBy") {
+		t.Errorf("hold comment = %q, want it to name the held task and the createdBy mismatch", comments[2])
 	}
 }
 
