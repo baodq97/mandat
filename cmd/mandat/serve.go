@@ -221,6 +221,15 @@ func runTask(ctx context.Context, d serveDeps, tc task.TaskContract) (orchestrat
 		// setup-failed path above uses, reusing result_invalid (the existing event
 		// for "the pipeline could not vouch for this run") since setup_failed itself
 		// has no in-progress edge.
+		// verdict.Gates is meaningful despite the non-nil err: Verify's contract
+		// keeps the gate results collected before the operational failure
+		// (verify.Verdict.Gates), so the green re-run is journaled, not lost.
+		if len(verdict.Gates) > 0 {
+			if jErr := d.journalAct(ctx, &tc, out.RunID, d.ReviewerIdentity, actGateRerun,
+				detailJSON(map[string]any{"gates": verdict.Gates})); jErr != nil {
+				return state, jErr
+			}
+		}
 		if jErr := d.journalAct(ctx, &tc, out.RunID, systemOrchestrator, actVerifyError,
 			detailJSON(map[string]any{"error": err.Error()})); jErr != nil {
 			return state, jErr

@@ -3,6 +3,7 @@ package verify
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -312,6 +313,53 @@ func TestVerify_ProbeFailed(t *testing.T) {
 				t.Errorf("probe calls = %d, want 1", probe.calls)
 			}
 		})
+	}
+}
+
+// TestVerify_ProbeTransportErrorAfterGreenGates closes the AC-25 observability
+// gap: when the probe fails as an operational (transport) error after the gate
+// re-run already went green, Verify's error is non-nil AND the returned Verdict
+// still carries the gate results collected before the failure, so the caller can
+// journal the green gates instead of silently dropping them.
+func TestVerify_ProbeTransportErrorAfterGreenGates(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	gate1 := gateScript(t, dir, 0)
+	failName := "gate2.sh"
+	if err := os.WriteFile(filepath.Join(dir, failName), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write second gate: %v", err)
+	}
+	gate2 := "sh " + failName
+	remit := &fakeRemit{}
+	probe := &fakeProbe{identity: reviewerUser, err: errors.New("transport: connection reset by peer")}
+
+	got, err := New(probe).Verify(context.Background(), request(dir, []string{gate1, gate2}, remit))
+	if err == nil {
+		t.Fatal("Verify() error = nil, want the probe's transport error")
+	}
+	if len(got.Gates) != 2 || got.Gates[0].ExitCode != 0 || got.Gates[1].ExitCode != 0 {
+		t.Errorf("Gates = %+v, want both green gate results carried alongside the operational error", got.Gates)
+	}
+}
+
+// TestVerify_DiffCheckTransportError proves the converse: when the operational
+// error happens in the diff-inside-remit check, before the gate re-run has even
+// started, Gates stays empty — there is nothing to carry.
+func TestVerify_DiffCheckTransportError(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	gate := gateScript(t, dir, 0)
+	remit := &fakeRemit{err: errors.New("transport: diff-check connection reset")}
+	probe := &fakeProbe{identity: reviewerUser, info: PRInfo{Exists: true, CreatedBy: devUser}}
+
+	got, err := New(probe).Verify(context.Background(), request(dir, []string{gate}, remit))
+	if err == nil {
+		t.Fatal("Verify() error = nil, want the diff-check's transport error")
+	}
+	if len(got.Gates) != 0 {
+		t.Errorf("Gates = %+v, want empty: the gate re-run never started", got.Gates)
 	}
 }
 
