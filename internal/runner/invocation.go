@@ -17,6 +17,23 @@ import (
 // flag: -p with no positional prompt makes claude read the user message from
 // stdin, so the runner streams TaskPrompt there (see Supervisor.run) rather than
 // escaping a possibly long acceptance body onto the command line.
+//
+// --permission-mode bypassPermissions is required, not "dontAsk": verified live
+// against claude CLI 2.1.211, dontAsk DENIES every mutating tool (Edit, Write,
+// Bash-with-side-effects) in a non-interactive -p run — there is no terminal to
+// ask, so the agent can never edit, commit, or write its ResultContract.
+// bypassPermissions lets the headless agent invoke any tool without interactive
+// approval; the mechanical PreToolUse deny hook wired through --settings below
+// (remit-guard) is what actually gates writes, confirmed live to still block an
+// out-of-worktree escape write under bypassPermissions.
+//
+// --bare is deliberately NOT set: verified live against claude CLI 2.1.211, --bare
+// ignores CLAUDE_CODE_OAUTH_TOKEN env-based auth (apiKeySource resolves to none,
+// every run dies before a model turn) and its "minimal mode" also skips the
+// PreToolUse deny hook wired through --settings below, defeating the mechanical
+// remit guard. Isolation instead comes from the isolated CLAUDE_CONFIG_DIR, the
+// runner's env allow-list (buildEnv), and sparse-checkout — --bare would duplicate
+// that at the cost of auth and the deny hook.
 func (s *Supervisor) buildArgv(req Request, sessionID string, resume bool) ([]string, error) {
 	settings, err := denySettingsJSON(req.DenyToolHookCommand)
 	if err != nil {
@@ -28,11 +45,10 @@ func (s *Supervisor) buildArgv(req Request, sessionID string, resume bool) ([]st
 		"--output-format", "stream-json",
 		"--verbose",
 		"--model", string(req.Role.ModelTier),
-		"--permission-mode", "dontAsk",
+		"--permission-mode", "bypassPermissions",
 		"--add-dir", req.Worktree.Dir,
 		"--append-system-prompt-file", req.Role.Playbook,
 		"--settings", settings,
-		"--bare",
 	}
 	if resume {
 		argv = append(argv, "--resume", sessionID)

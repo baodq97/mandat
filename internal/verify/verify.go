@@ -2,9 +2,11 @@
 // whether a completed run may advance to in-review (RFC-0001 §Definition of done,
 // AC-23..AC-27, §Verification). It turns a finished run's worktree and its
 // TaskContract into one orchestrator.Event by checking three independent grounds
-// of truth in the verifier's OWN context, in cheapest-truth order — the gate
-// re-run, the diff-inside-remit check, then the PR-existence probe — and yields
-// the result_ok-eligible event only when all three pass.
+// of truth in the verifier's OWN context — the diff-inside-remit check, the gate
+// re-run, then the PR-existence probe, in that order so a gate's own side effects
+// (build artifacts a re-run writes into the worktree) can never be misread as the
+// agent's out-of-remit escape — and yields the result_ok-eligible event only when
+// all three pass.
 //
 // Two ADR-0003 invariants shape this package and are worth stating because the
 // code cannot show them on its own:
@@ -158,8 +160,10 @@ type Verdict struct {
 	Detail string
 
 	// Gates is the per-command gate re-run result for runs.gate_result (AC-25).
-	// It is populated on every verdict in which the gates ran — including a later
-	// diff or probe failure, since the gates still ran green first.
+	// It is populated once the gate re-run has started — gate_red and every
+	// verdict after it (a later probe failure, or result_ok) — but stays empty on
+	// remit_violation, since the diff-inside-remit check now runs before the
+	// gates and short-circuits before they start.
 	Gates []GateResult
 
 	// PR is the probe's finding, populated once the probe ran (gates green and
@@ -184,9 +188,12 @@ func New(probe PRProbe) *Verifier {
 // Verify runs the three ground-truth checks in order and returns the derived
 // event. A non-nil error is an operational failure (a gate that could not be
 // launched, a diff or probe transport error) distinct from a failed check, which
-// is reported as a Verdict with the matching event. Order is gate re-run, then
-// diff, then probe, short-circuiting on the first failure; all three must pass to
-// return EventResultOK.
+// is reported as a Verdict with the matching event. Order is diff-inside-remit,
+// then gate re-run, then probe, short-circuiting on the first failure; all three
+// must pass to return EventResultOK. The diff runs first, on the worktree exactly
+// as the agent left it, so gate side effects (e.g., a test run's __pycache__)
+// exist only after the diff has already been read and can never register as an
+// out-of-remit escape.
 func (v *Verifier) Verify(ctx context.Context, req Request) (Verdict, error) {
 	if err := req.validate(); err != nil {
 		return Verdict{}, err
@@ -202,14 +209,9 @@ func (v *Verifier) Verify(ctx context.Context, req Request) (Verdict, error) {
 		return Verdict{}, fmt.Errorf("verify: probe identity %q equals the Dev agent user; writer must differ from scorer (RFC-0001 §4.1, §4.7)", id)
 	}
 
-	gates, event, detail, err := v.rerunGates(ctx, req)
-	if err != nil {
-		return Verdict{}, err
-	}
-	if event != "" {
-		return Verdict{Event: event, Failed: CheckGate, Detail: detail, Gates: gates}, nil
-	}
-
+	// Diff-inside-remit runs before the gate re-run: it reads the worktree exactly
+	// as the agent left it, before a gate can write anything into it, so a gate's
+	// own build artifacts can never be mistaken for the agent's escape.
 	if err := req.Remit.DiffInsideRemit(ctx); err != nil {
 		var rv *workspace.RemitViolationError
 		if errors.As(err, &rv) {
@@ -217,10 +219,17 @@ func (v *Verifier) Verify(ctx context.Context, req Request) (Verdict, error) {
 				Event:  orchestrator.EventRemitViolation,
 				Failed: CheckDiff,
 				Detail: fmt.Sprintf("change to %q is outside the remit", rv.Path),
-				Gates:  gates,
 			}, nil
 		}
 		return Verdict{}, fmt.Errorf("verify: diff-inside-remit check: %w", err)
+	}
+
+	gates, event, detail, err := v.rerunGates(ctx, req)
+	if err != nil {
+		return Verdict{}, err
+	}
+	if event != "" {
+		return Verdict{Event: event, Failed: CheckGate, Detail: detail, Gates: gates}, nil
 	}
 
 	info, err := v.probe.FindPR(ctx, PRRef{Repo: req.Task.Remit.Repo, Branch: req.Branch})

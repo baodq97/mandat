@@ -218,6 +218,7 @@ func (b *Broker) mint(ctx context.Context, role string) (string, time.Time, erro
 	leg3 := url.Values{}
 	leg3.Set("client_id", rc.AgentIdentityID)
 	leg3.Set("grant_type", "user_fic")
+	leg3.Set("client_assertion_type", clientAssertionType)
 	leg3.Set("client_assertion", t1)
 	leg3.Set("user_id", rc.AgentUserID)
 	leg3.Set("user_federated_identity_credential", t2)

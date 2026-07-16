@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/baodq97/mandat/internal/config"
 	"github.com/baodq97/mandat/internal/identity"
@@ -71,8 +72,29 @@ func buildBroker(cfg *config.Config) *identity.Broker {
 	default:
 		// The client-certificate pilot path has no cert-credential constructor yet
 		// (identity offers secret and managed-identity); until it lands, the dev pilot
-		// mints leg 1 from a client secret in MANDAT_CLIENT_SECRET.
-		cred = identity.NewSecretCredential(os.Getenv("MANDAT_CLIENT_SECRET"))
+		// mints leg 1 from a client secret in MANDAT_CLIENT_SECRET, or the file named
+		// by MANDAT_CLIENT_SECRET_FILE when this process is itself the spawned child's
+		// git-credential helper (see resolveClientSecret).
+		cred = identity.NewSecretCredential(resolveClientSecret())
 	}
 	return identity.NewBroker(cfg, cred, identity.AzureDevOpsResource)
+}
+
+// resolveClientSecret returns the pilot client-secret from MANDAT_CLIENT_SECRET,
+// falling back to the file named by MANDAT_CLIENT_SECRET_FILE (whitespace
+// trimmed). The file fallback exists so the spawned agent's git-credential helper
+// can mint from the child env, which by AC-15 carries the file PATH but never the
+// secret value; production's managed-identity mode uses neither. An empty return
+// is passed through unchanged so the mint fails with a clear Entra error rather
+// than here.
+func resolveClientSecret() string {
+	if v := os.Getenv("MANDAT_CLIENT_SECRET"); v != "" {
+		return v
+	}
+	if f := os.Getenv("MANDAT_CLIENT_SECRET_FILE"); f != "" {
+		if b, err := os.ReadFile(f); err == nil { //nolint:gosec // MANDAT_CLIENT_SECRET_FILE is operator-set config (pilot), not untrusted input; prod uses managed-identity and never reads a secret file
+			return strings.TrimSpace(string(b))
+		}
+	}
+	return ""
 }

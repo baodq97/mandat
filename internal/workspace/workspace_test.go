@@ -132,6 +132,83 @@ func TestProvision_SetupFailureHasNoFallback(t *testing.T) {
 	}
 }
 
+func TestGitCredArgs(t *testing.T) {
+	t.Parallel()
+
+	args := []string{"fetch", "--prune"}
+
+	got := gitCredArgs("", args...)
+	if len(got) != len(args) {
+		t.Fatalf("gitCredArgs(\"\", ...) = %v, want args unchanged %v", got, args)
+	}
+	for i := range args {
+		if got[i] != args[i] {
+			t.Errorf("gitCredArgs(\"\", ...)[%d] = %q, want %q", i, got[i], args[i])
+		}
+	}
+
+	helper := "!mandat git-credential --role dev"
+	got = gitCredArgs(helper, args...)
+	want := []string{"-c", "credential.helper=" + helper, "fetch", "--prune"}
+	if len(got) != len(want) {
+		t.Fatalf("gitCredArgs(%q, ...) = %v, want %v", helper, got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("gitCredArgs(%q, ...)[%d] = %q, want %q", helper, i, got[i], want[i])
+		}
+	}
+}
+
+func TestProvision_CredentialHelperOverrideHarmlessAgainstLocalOrigin(t *testing.T) {
+	t.Parallel()
+
+	// The mirror clone/fetch gain a `-c credential.helper=...` override
+	// (RFC-0001 §Identity injection); a local bare origin needs no auth, so the
+	// override must be a no-op, not a breakage.
+	cfg := Config{
+		RepoURL:          newBareOrigin(t),
+		MirrorDir:        filepath.Join(t.TempDir(), "mirror.git"),
+		TasksRoot:        t.TempDir(),
+		TaskID:           "ado-baodo0220-43",
+		Remit:            task.Remit{Repo: "mandat", BaseBranch: "main", Paths: []string{"cmd/mandat/", "internal/buildinfo/"}},
+		CredentialHelper: "!mandat git-credential --role dev",
+	}
+	ws, err := Provision(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Provision() with CredentialHelper set against a local origin error = %v, want nil", err)
+	}
+	assertExists(t, filepath.Join(ws.Dir, "cmd/mandat/main.go"))
+}
+
+func TestProvision_MirrorForcedNonBare(t *testing.T) {
+	t.Parallel()
+
+	// A --mirror clone sets core.bare=true; on git < 2.35 (the customer VM's
+	// 2.34.1) that leaks into linked worktrees and every work-tree op there
+	// fails. ensureMirror must force it back to false so the fix holds
+	// regardless of the git version running the test.
+	mirrorDir := filepath.Join(t.TempDir(), "mirror.git")
+	cfg := Config{
+		RepoURL:   newBareOrigin(t),
+		MirrorDir: mirrorDir,
+		TasksRoot: t.TempDir(),
+		TaskID:    "ado-baodo0220-44",
+		Remit:     task.Remit{Repo: "mandat", BaseBranch: "main", Paths: []string{"cmd/mandat/", "internal/buildinfo/"}},
+	}
+	if _, err := Provision(context.Background(), cfg); err != nil {
+		t.Fatalf("Provision() error = %v, want nil", err)
+	}
+
+	out, err := exec.Command("git", "-C", mirrorDir, "config", "--get", "core.bare").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git config --get core.bare: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "false" {
+		t.Errorf("core.bare = %q, want %q", got, "false")
+	}
+}
+
 func git(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

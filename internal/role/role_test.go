@@ -18,6 +18,7 @@ func testConfig() *config.Config {
 			"dev": {
 				AgentIdentityID: "agent-identity-dev-01",
 				AgentUserID:     "agent-user-dev-01",
+				AgentUserName:   "dev-agent@baodo0220.onmicrosoft.com",
 				AutonomyCeiling: config.CeilingDraftPR,
 				ModelTier:       config.ModelOpus,
 				Playbook:        "playbooks/dev.md",
@@ -27,6 +28,7 @@ func testConfig() *config.Config {
 			"qa": {
 				AgentIdentityID: "agent-identity-qa-01",
 				AgentUserID:     "agent-user-qa-01",
+				AgentUserName:   "qa-agent@baodo0220.onmicrosoft.com",
 				AutonomyCeiling: config.CeilingReport,
 				Playbook:        "playbooks/qa.md",
 			},
@@ -49,8 +51,12 @@ func TestResolve(t *testing.T) {
 			name:     "per-role model tier override honored",
 			roleName: "dev",
 			want: Role{
-				Name:            "dev",
-				Mandate:         MandateRef{AgentIdentityID: "agent-identity-dev-01", AgentUserID: "agent-user-dev-01"},
+				Name: "dev",
+				Mandate: MandateRef{
+					AgentIdentityID: "agent-identity-dev-01",
+					AgentUserID:     "agent-user-dev-01",
+					AgentUserName:   "dev-agent@baodo0220.onmicrosoft.com",
+				},
 				Playbook:        "playbooks/dev.md",
 				Skills:          []string{"go-testing"},
 				RemitPaths:      []string{"internal/"},
@@ -65,8 +71,12 @@ func TestResolve(t *testing.T) {
 			name:     "no override defaults to sonnet, ceiling passes through unchanged",
 			roleName: "qa",
 			want: Role{
-				Name:            "qa",
-				Mandate:         MandateRef{AgentIdentityID: "agent-identity-qa-01", AgentUserID: "agent-user-qa-01"},
+				Name: "qa",
+				Mandate: MandateRef{
+					AgentIdentityID: "agent-identity-qa-01",
+					AgentUserID:     "agent-user-qa-01",
+					AgentUserName:   "qa-agent@baodo0220.onmicrosoft.com",
+				},
 				Playbook:        "playbooks/qa.md",
 				AutonomyCeiling: config.CeilingReport,
 				ModelTier:       config.ModelSonnet,

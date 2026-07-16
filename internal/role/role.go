@@ -25,6 +25,10 @@ const defaultModelTier = config.ModelSonnet
 type MandateRef struct {
 	AgentIdentityID string
 	AgentUserID     string
+	// AgentUserName is the tracker assignment handle (the UPN for Azure
+	// DevOps); the tracker adapter matches assignment on this, never on
+	// AgentUserID.
+	AgentUserName string
 }
 
 // Role is one RoleAgent resolved from config: mandate reference, playbook
@@ -71,6 +75,7 @@ func Resolve(cfg *config.Config, name string) (Role, error) {
 		Mandate: MandateRef{
 			AgentIdentityID: rc.AgentIdentityID,
 			AgentUserID:     rc.AgentUserID,
+			AgentUserName:   rc.AgentUserName,
 		},
 		Playbook:        rc.Playbook,
 		Skills:          rc.Skills,

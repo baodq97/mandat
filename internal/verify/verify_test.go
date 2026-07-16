@@ -48,7 +48,8 @@ func (f *fakeProbe) FindPR(_ context.Context, ref PRRef) (PRInfo, error) {
 
 // fakeRemit is the §9 diff-inside-remit double. err nil means the diff stayed in
 // the remit; a *workspace.RemitViolationError means it escaped. It counts calls so
-// a test can prove the diff check ran only after the gates passed.
+// a test can prove whether (and how often) the diff check ran relative to the
+// gate re-run and the probe.
 type fakeRemit struct {
 	err   error
 	calls int
@@ -57,6 +58,18 @@ type fakeRemit struct {
 func (f *fakeRemit) DiffInsideRemit(_ context.Context) error {
 	f.calls++
 	return f.err
+}
+
+// orderedRemit is the diff-inside-remit double for TestVerify_DiffRunsBeforeGate.
+// It writes a sentinel file when called, so a gate script run afterward can
+// prove causally — not just by call count — that the diff already ran: the
+// gate checks for the sentinel's existence and fails if it is missing.
+type orderedRemit struct {
+	sentinel string
+}
+
+func (o *orderedRemit) DiffInsideRemit(_ context.Context) error {
+	return os.WriteFile(o.sentinel, []byte("diff ran"), 0o644)
 }
 
 // gateScript writes a script exiting exitCode into dir and returns the gate
@@ -155,9 +168,11 @@ func TestVerify_ResultOK_AllThreeChecksPass(t *testing.T) {
 	}
 }
 
-// TestVerify_GateRed drives the gate_red outcome: a gate that exits non-zero holds
-// the run for a human, names the failing command and its exit code, and stops
-// before the diff and probe run (order: gate -> diff -> probe, AC-24).
+// TestVerify_GateRed drives the gate_red outcome: a gate that exits non-zero
+// holds the run for a human, names the failing command and its exit code, and
+// stops before the probe. The diff-inside-remit check already ran (and passed)
+// before the gate re-run started — order is diff -> gate -> probe — so
+// remit.calls is 1; only the probe never runs (AC-24).
 func TestVerify_GateRed(t *testing.T) {
 	t.Parallel()
 
@@ -182,19 +197,20 @@ func TestVerify_GateRed(t *testing.T) {
 	if !strings.Contains(got.Detail, "1") {
 		t.Errorf("Detail = %q, want it to name the exit code", got.Detail)
 	}
-	// A red gate short-circuits: the cheaper-truth checks after it never ran.
-	if remit.calls != 0 {
-		t.Errorf("diff-inside-remit calls = %d, want 0 (gate short-circuits)", remit.calls)
+	if remit.calls != 1 {
+		t.Errorf("diff-inside-remit calls = %d, want 1 (diff runs before the gate)", remit.calls)
 	}
+	// A red gate short-circuits before the probe.
 	if probe.calls != 0 {
-		t.Errorf("probe calls = %d, want 0 (gate short-circuits)", probe.calls)
+		t.Errorf("probe calls = %d, want 0 (gate short-circuits before the probe)", probe.calls)
 	}
 }
 
-// TestVerify_RemitViolation drives the remit_violation outcome: with the gates
-// green, an out-of-remit diff holds the run for a human, names the escaping path,
-// and stops before the probe. The gate results are still recorded (they ran green
-// first) for runs.gate_result (AC-17, AC-25).
+// TestVerify_RemitViolation drives the remit_violation outcome: an out-of-remit
+// diff holds the run for a human, names the escaping path, and stops before the
+// gate re-run and the probe even start. The diff runs first precisely so a
+// gate's own side effects (e.g., a test run's __pycache__) can never be misread
+// as the agent's escape — so the gates never ran and Gates is empty (AC-17).
 func TestVerify_RemitViolation(t *testing.T) {
 	t.Parallel()
 
@@ -219,11 +235,44 @@ func TestVerify_RemitViolation(t *testing.T) {
 	if remit.calls != 1 {
 		t.Errorf("diff-inside-remit calls = %d, want 1", remit.calls)
 	}
+	if len(got.Gates) != 0 {
+		t.Errorf("Gates = %+v, want empty: the gate re-run never starts once the diff has already failed", got.Gates)
+	}
 	if probe.calls != 0 {
-		t.Errorf("probe calls = %d, want 0 (remit violation short-circuits before the probe)", probe.calls)
+		t.Errorf("probe calls = %d, want 0 (remit violation short-circuits before the gate and the probe)", probe.calls)
+	}
+}
+
+// TestVerify_DiffRunsBeforeGate proves the diff-before-gate invariant causally,
+// not just by call count: the gate command is a script that checks for a
+// sentinel file, which the diff-inside-remit double writes when it runs. If the
+// gate ever ran before the diff, the sentinel would be missing and the script
+// would exit non-zero — turning a regressed ordering into a gate_red rather than
+// a silently-wrong result_ok.
+func TestVerify_DiffRunsBeforeGate(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sentinel := filepath.Join(dir, "diff-ran-first")
+	const script = "gate-order-check.sh"
+	body := fmt.Sprintf("#!/bin/sh\ntest -f %q && exit 0\nexit 9\n", sentinel)
+	if err := os.WriteFile(filepath.Join(dir, script), []byte(body), 0o755); err != nil {
+		t.Fatalf("write gate order-check script: %v", err)
+	}
+	gate := "sh " + script
+
+	remit := &orderedRemit{sentinel: sentinel}
+	probe := &fakeProbe{identity: reviewerUser, info: PRInfo{Exists: true, CreatedBy: devUser}}
+
+	got, err := New(probe).Verify(context.Background(), request(dir, []string{gate}, remit))
+	if err != nil {
+		t.Fatalf("Verify() error = %v", err)
+	}
+	if got.Event != orchestrator.EventResultOK {
+		t.Errorf("event = %q, want %q: the gate must observe the diff's sentinel, proving the diff ran first", got.Event, orchestrator.EventResultOK)
 	}
 	if len(got.Gates) != 1 || got.Gates[0].ExitCode != 0 {
-		t.Errorf("Gates = %+v, want the green gate recorded despite the later diff failure", got.Gates)
+		t.Errorf("Gates = %+v, want the order-check gate to pass", got.Gates)
 	}
 }
 

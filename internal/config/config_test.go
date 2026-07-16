@@ -46,6 +46,7 @@ roles:
   dev:
     agent_identity_id: agent-identity-dev-01
     agent_user_id: agent-user-dev-01
+    agent_user_name: dev-agent@baodo0220.onmicrosoft.com
     autonomy_ceiling: draft-pr
     model_tier: opus
     playbook: playbooks/dev.md
@@ -54,6 +55,7 @@ roles:
   qa:
     agent_identity_id: agent-identity-qa-01
     agent_user_id: agent-user-qa-01
+    agent_user_name: qa-agent@baodo0220.onmicrosoft.com
     autonomy_ceiling: report
     playbook: playbooks/qa.md
 budget:
@@ -92,6 +94,7 @@ func TestLoad_ValidRoundTrips(t *testing.T) {
 			"dev": {
 				AgentIdentityID: "agent-identity-dev-01",
 				AgentUserID:     "agent-user-dev-01",
+				AgentUserName:   "dev-agent@baodo0220.onmicrosoft.com",
 				AutonomyCeiling: CeilingDraftPR,
 				ModelTier:       ModelOpus,
 				Playbook:        "playbooks/dev.md",
@@ -100,6 +103,7 @@ func TestLoad_ValidRoundTrips(t *testing.T) {
 			"qa": {
 				AgentIdentityID: "agent-identity-qa-01",
 				AgentUserID:     "agent-user-qa-01",
+				AgentUserName:   "qa-agent@baodo0220.onmicrosoft.com",
 				AutonomyCeiling: CeilingReport,
 				Playbook:        "playbooks/qa.md",
 			},
@@ -160,6 +164,7 @@ roles:
   dev:
     agent_identity_id: agent-identity-dev-01
     agent_user_id: agent-user-dev-01
+    agent_user_name: dev-agent@baodo0220.onmicrosoft.com
     autonomy_ceiling: draft-pr
     playbook: playbooks/dev.md
 budget:
@@ -242,6 +247,13 @@ func TestLoad_RejectsInvalid(t *testing.T) {
 			name:    "missing agent_user_id under agent-user-pair",
 			mutate:  func(s string) string { return strings.Replace(s, "    agent_user_id: agent-user-dev-01\n", "", 1) },
 			wantSub: "roles.dev.agent_user_id",
+		},
+		{
+			name: "missing agent_user_name under agent-user-pair",
+			mutate: func(s string) string {
+				return strings.Replace(s, "    agent_user_name: dev-agent@baodo0220.onmicrosoft.com\n", "", 1)
+			},
+			wantSub: "roles.dev.agent_user_name",
 		},
 		{
 			name:    "non-positive budget",

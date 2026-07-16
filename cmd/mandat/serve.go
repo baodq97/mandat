@@ -226,11 +226,12 @@ func (d serveDeps) provision(ctx context.Context, tc *task.TaskContract) (*works
 		return nil, err
 	}
 	return d.Provision(ctx, workspace.Config{
-		RepoURL:   repoURL,
-		MirrorDir: d.MirrorDir(tc.Remit.Repo),
-		TasksRoot: d.TasksRoot,
-		TaskID:    tc.ID,
-		Remit:     tc.Remit,
+		RepoURL:          repoURL,
+		MirrorDir:        d.MirrorDir(tc.Remit.Repo),
+		TasksRoot:        d.TasksRoot,
+		TaskID:           tc.ID,
+		Remit:            tc.Remit,
+		CredentialHelper: d.GitCredentialHelper,
 	})
 }
 
@@ -419,7 +420,7 @@ func buildServeDeps(cfg *config.Config, store *journal.Store, roleName string, m
 		Org:          cfg.Tracker.Org,
 		Project:      cfg.Tracker.Project,
 		Role:         roleName,
-		DevAgentUser: r.Mandate.AgentUserID,
+		DevAgentUser: r.Mandate.AgentUserName,
 		Tokens:       broker,
 		Remits:       cfg,
 	})

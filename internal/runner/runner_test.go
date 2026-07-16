@@ -329,13 +329,18 @@ func TestSupervisor_Run_HappyPath(t *testing.T) {
 	if spawner.got.Argv[0] != os.Args[0] {
 		t.Errorf("argv[0] = %q, want the claude path %q", spawner.got.Argv[0], os.Args[0])
 	}
-	for _, f := range []string{"-p", "--verbose", "--bare"} {
+	for _, f := range []string{"-p", "--verbose"} {
 		if !hasFlag(spawner.got.Argv, f) {
 			t.Errorf("argv missing %q", f)
 		}
 	}
+	// --bare ignores env-based OAuth auth and skips the PreToolUse deny hook
+	// (claude CLI 2.1.211); it must never ride on the spawned argv.
+	if hasFlag(spawner.got.Argv, "--bare") {
+		t.Error("argv must not carry --bare: it breaks env-OAuth auth and skips the deny hook")
+	}
 	assertFlagValue(t, spawner.got.Argv, "--output-format", "stream-json")
-	assertFlagValue(t, spawner.got.Argv, "--permission-mode", "dontAsk")
+	assertFlagValue(t, spawner.got.Argv, "--permission-mode", "bypassPermissions")
 	assertFlagValue(t, spawner.got.Argv, "--add-dir", req.Worktree.Dir)
 	assertFlagValue(t, spawner.got.Argv, "--model", "sonnet")
 	assertFlagValue(t, spawner.got.Argv, "--append-system-prompt-file", req.Role.Playbook)
@@ -642,6 +647,32 @@ func TestSupervisor_Run_ChildEnvCarriesModelAuthNotEntraToken(t *testing.T) {
 	}
 }
 
+// TestSupervisor_Run_ChildEnvCarriesSecretFilePath guards buildEnv's one
+// deliberate pilot exception: the child gets the MANDAT_CLIENT_SECRET_FILE
+// PATH so its own `git push` can re-invoke `mandat git-credential`, which
+// reads the file on demand to mint the agent-user token
+// (S-credential-delivery). Only the path crosses the allow-list, never the
+// secret value, so this must assert the var is forwarded — without it,
+// deleting the allow-list line leaves the suite green.
+func TestSupervisor_Run_ChildEnvCarriesSecretFilePath(t *testing.T) {
+	const secretFile = "/etc/mandat/client-secret"
+	t.Setenv("MANDAT_CLIENT_SECRET_FILE", secretFile)
+
+	ctx := context.Background()
+	store := openStore(t)
+	req := newRequest(t, config.ModelSonnet)
+	spawner := &fakeClaudeSpawner{scenario: "completed"}
+	sup := New(store, spawner, Config{ClaudePath: os.Args[0], MaxBudgetUSD: 5})
+
+	if _, err := sup.Run(ctx, req); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if v, ok := envValue(spawner.got.Env, "MANDAT_CLIENT_SECRET_FILE"); !ok || v != secretFile {
+		t.Errorf("child MANDAT_CLIENT_SECRET_FILE = %q (present=%v), want %q", v, ok, secretFile)
+	}
+}
+
 // TestSupervisor_Resume_UsesResumeFlag proves the resume path swaps --session-id
 // for --resume against the existing session in the same worktree, and journals it.
 func TestSupervisor_Resume_UsesResumeFlag(t *testing.T) {
@@ -699,10 +730,15 @@ func TestBuildArgv_ADR0006FlagSet(t *testing.T) {
 	assertFlagValue(t, argv, "--session-id", "sess-123")
 	assertFlagValue(t, argv, "--add-dir", "/wt")
 	assertFlagValue(t, argv, "--max-budget-usd", "5.00")
-	for _, f := range []string{"-p", "--verbose", "--bare"} {
+	for _, f := range []string{"-p", "--verbose"} {
 		if !hasFlag(argv, f) {
 			t.Errorf("argv missing %q", f)
 		}
+	}
+	// --bare ignores env-based OAuth auth and skips the PreToolUse deny hook
+	// (claude CLI 2.1.211); it must never ride on the spawned argv.
+	if hasFlag(argv, "--bare") {
+		t.Error("argv must not carry --bare: it breaks env-OAuth auth and skips the deny hook")
 	}
 
 	// --settings carries a well-formed PreToolUse deny hook wrapping the command.
@@ -835,6 +871,36 @@ func TestSupervisor_WiresGitCredentialHelper(t *testing.T) {
 	}
 	if !strings.Contains(string(cfg), "git-credential") {
 		t.Errorf(".git/config does not carry the helper command:\n%s", cfg)
+	}
+}
+
+// TestSupervisor_Run_ConfiguresGitAuthor is the commit-attribution seam: Run
+// pins the worktree's user.name and user.email to the mandate's agent user
+// before the spawn, so a `git commit` the child makes is attributed to the
+// agent user rather than inheriting the OS pilot user's global gitconfig
+// (ADO matches a commit's identity by author email).
+func TestSupervisor_Run_ConfiguresGitAuthor(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	ctx := context.Background()
+	store := openStore(t)
+	req := newRequest(t, config.ModelSonnet)
+	req.Role.Mandate.AgentUserName = "agent-user-dev-01@baotest.onmicrosoft.com"
+	gitInit(t, req.Worktree.Dir)
+
+	spawner := &fakeClaudeSpawner{scenario: "completed"}
+	sup := New(store, spawner, Config{ClaudePath: os.Args[0], MaxBudgetUSD: 5})
+
+	if _, err := sup.Run(ctx, req); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if got := gitConfigGet(t, req.Worktree.Dir, "user.email"); got != req.Role.Mandate.AgentUserName {
+		t.Errorf("user.email = %q, want the agent user %q", got, req.Role.Mandate.AgentUserName)
+	}
+	if got := gitConfigGet(t, req.Worktree.Dir, "user.name"); got != req.Role.Mandate.AgentUserName {
+		t.Errorf("user.name = %q, want the agent user %q", got, req.Role.Mandate.AgentUserName)
 	}
 }
 

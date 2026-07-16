@@ -190,6 +190,12 @@ func (s *Supervisor) run(ctx context.Context, req Request, sessionID string, res
 		}
 	}
 
+	if req.Role.Mandate.AgentUserName != "" {
+		if err := configureGitAuthor(ctx, req.Worktree.Dir, req.Role.Mandate.AgentUserName, req.Role.Mandate.AgentUserName); err != nil {
+			return Outcome{}, err
+		}
+	}
+
 	// Session id before spawn (ADR-0006). This append lands in the journal ahead
 	// of the child starting; if the spawn then crashes, the run is still
 	// addressable by its session id even though the runs row below never runs.
@@ -331,6 +337,32 @@ func configureGitCredential(ctx context.Context, worktreeDir, helper string) err
 	return nil
 }
 
+// configureGitAuthor pins the worktree's commit author to the mandate's agent
+// user: the playbook tells the spawned agent the author identity is already
+// configured and not to touch it, so this must run before the spawn. Without
+// it, `git commit` in the worktree inherits the OS pilot user's own global
+// gitconfig, breaking writer=agent-user attribution at the commit level even
+// though the PR creator (the push, over the agent-user token) is already
+// correct. Azure DevOps attributes a commit to an identity by author EMAIL,
+// so both user.name and user.email carry the agent user's UPN.
+func configureGitAuthor(ctx context.Context, worktreeDir, name, email string) error {
+	env := append(os.Environ(),
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+	)
+	for _, kv := range [][2]string{{"user.name", name}, {"user.email", email}} {
+		cmd := exec.CommandContext(ctx, "git", "-C", worktreeDir, "config", kv[0], kv[1])
+		cmd.Env = env
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("runner: configure git author %s: %w (%s)", kv[0], err, strings.TrimSpace(stderr.String()))
+		}
+	}
+	return nil
+}
+
 // buildEnv is the child's whole environment: an explicit allow-list, never
 // os.Environ(). Inheriting the parent env would carry the blueprint secret or a
 // delegated token into a process the role OS user controls, the exact breach
@@ -346,6 +378,17 @@ func configureGitCredential(ctx context.Context, worktreeDir, helper string) err
 // from the runner's own process env when the operator has set them there —
 // still a named-var allow-list, never os.Environ(). PATH is not a secret and the
 // child needs it to find its tools.
+//
+// MANDAT_CLIENT_SECRET_FILE is the pilot's one deliberate exception, and it is
+// still AC-15-clean: it carries only the client-secret FILE PATH, never the
+// secret value. When the child's own `git push` re-invokes `mandat
+// git-credential` as its own subprocess, that helper reads the file on demand
+// to mint the agent-user token (S-credential-delivery) — the child never sees
+// MANDAT_CLIENT_SECRET itself. Honestly, the pilot runs one OS user with no
+// isolation between parent and child, so the child process can read whatever
+// the path points at regardless of this var; production's managed-identity
+// mode carries no secret file at all, so this line is a pilot-only artifact
+// that a future isolated pilot mode should revisit.
 func buildEnv(req Request, resultPath string) []string {
 	env := []string{
 		"PATH=" + os.Getenv("PATH"),
@@ -358,6 +401,9 @@ func buildEnv(req Request, resultPath string) []string {
 	}
 	if v := os.Getenv("ANTHROPIC_API_KEY"); v != "" {
 		env = append(env, "ANTHROPIC_API_KEY="+v)
+	}
+	if v := os.Getenv("MANDAT_CLIENT_SECRET_FILE"); v != "" {
+		env = append(env, "MANDAT_CLIENT_SECRET_FILE="+v)
 	}
 	return env
 }

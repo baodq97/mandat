@@ -61,6 +61,11 @@ type Config struct {
 	// Remit carries the base branch the worktree forks from and the allow-list
 	// of path patterns the sparse checkout materializes (spec §4.5).
 	Remit task.Remit
+	// CredentialHelper, when set, is passed as `-c credential.helper=<value>` to
+	// the mirror clone and fetch so those network ops authenticate to the origin
+	// (the agent-user token via `mandat git-credential`); local-bare-origin tests
+	// leave it empty and clone unauthenticated.
+	CredentialHelper string
 }
 
 // Workspace is a provisioned per-task sandbox: the worktree directory, its
@@ -111,7 +116,7 @@ func (e *RemitViolationError) Error() string {
 // failure returns a *SetupError and no Workspace; there is no shared-checkout
 // fallback (spec §4.5, RFC-0001 AC-18).
 func Provision(ctx context.Context, cfg Config) (*Workspace, error) {
-	if err := ensureMirror(ctx, cfg.RepoURL, cfg.MirrorDir); err != nil {
+	if err := ensureMirror(ctx, cfg.RepoURL, cfg.MirrorDir, cfg.CredentialHelper); err != nil {
 		return nil, err
 	}
 
@@ -223,21 +228,41 @@ func pathInRemit(changed string, patterns []string) bool {
 // mirror shares its object store natively, which is the object sharing RFC-0001's
 // "git worktree add --reference against the mirror" phrasing intends. The
 // skeleton runs one in-flight task (RFC-0001 scope), so the refresh needs no
-// cross-task lock yet.
-func ensureMirror(ctx context.Context, repoURL, mirrorDir string) error {
+// cross-task lock yet. credHelper is passed through gitCredArgs to the clone and
+// the fetch, the two network ops that need to authenticate to the origin.
+func ensureMirror(ctx context.Context, repoURL, mirrorDir, credHelper string) error {
 	if _, err := os.Stat(mirrorDir); err == nil {
-		if _, err := runGit(ctx, mirrorDir, "fetch", "--prune"); err != nil {
+		if _, err := runGit(ctx, mirrorDir, gitCredArgs(credHelper, "fetch", "--prune")...); err != nil {
 			return &SetupError{Op: "mirror", Err: err}
 		}
-		return nil
+	} else {
+		if err := os.MkdirAll(filepath.Dir(mirrorDir), 0o700); err != nil {
+			return &SetupError{Op: "mirror", Err: err}
+		}
+		if _, err := runGit(ctx, "", gitCredArgs(credHelper, "clone", "--mirror", repoURL, mirrorDir)...); err != nil {
+			return &SetupError{Op: "mirror", Err: err}
+		}
 	}
-	if err := os.MkdirAll(filepath.Dir(mirrorDir), 0o700); err != nil {
-		return &SetupError{Op: "mirror", Err: err}
-	}
-	if _, err := runGit(ctx, "", "clone", "--mirror", repoURL, mirrorDir); err != nil {
+
+	// A --mirror clone sets core.bare=true, which git < 2.35 leaks into linked
+	// worktrees so every work-tree op there fails ("must be run in a work tree").
+	// Force it false so worktrees are non-bare on every git version; the mirror
+	// itself only ever fetches and hosts worktrees, never a work-tree op.
+	if _, err := runGit(ctx, mirrorDir, "config", "core.bare", "false"); err != nil {
 		return &SetupError{Op: "mirror", Err: err}
 	}
 	return nil
+}
+
+// gitCredArgs prepends a per-invocation credential.helper override to a git
+// argument list, or returns args unchanged when no helper is configured. The
+// override is one argv element, so a helper value with spaces (e.g. a `!cmd
+// --flag` shell helper) reaches git intact and is never shell-split here.
+func gitCredArgs(helper string, args ...string) []string {
+	if helper == "" {
+		return args
+	}
+	return append([]string{"-c", "credential.helper=" + helper}, args...)
 }
 
 // runGit runs a git subprocess in dir (or the current directory when dir is "")

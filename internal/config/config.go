@@ -113,8 +113,13 @@ type RepoConfig struct {
 // (RFC-0001 §Role config and playbook load, spec glossary). A role name
 // absent from the table is not enabled; there is no separate enabled flag.
 type RoleConfig struct {
-	AgentIdentityID string          `yaml:"agent_identity_id"`
-	AgentUserID     string          `yaml:"agent_user_id,omitempty"`
+	AgentIdentityID string `yaml:"agent_identity_id"`
+	AgentUserID     string `yaml:"agent_user_id,omitempty"`
+	// AgentUserName is the agent user's tracker-facing assignee handle (the
+	// UPN for Azure DevOps), distinct from AgentUserID (the Entra object id
+	// the token chain mints under): the tracker matches assignment on this,
+	// not the object id.
+	AgentUserName   string          `yaml:"agent_user_name,omitempty"`
 	AutonomyCeiling AutonomyCeiling `yaml:"autonomy_ceiling"`
 	ModelTier       ModelTier       `yaml:"model_tier,omitempty"`
 	Playbook        string          `yaml:"playbook"`
@@ -314,6 +319,9 @@ func (c *Config) validateRoles(add func(path, reason string)) {
 		}
 		if c.Entra.IdentityMode == IdentityAgentUserPair && rc.AgentUserID == "" {
 			add(p+".agent_user_id", "is required when entra.identity_mode is agent-user-pair")
+		}
+		if c.Entra.IdentityMode == IdentityAgentUserPair && rc.AgentUserName == "" {
+			add(p+".agent_user_name", "is required when entra.identity_mode is agent-user-pair (the tracker matches assignment on the agent user's UPN, not its object id)")
 		}
 		switch rc.AutonomyCeiling {
 		case CeilingReport, CeilingDraftPR, CeilingUnattended:

@@ -216,10 +216,12 @@ func TestBroker_ThreeLegChain(t *testing.T) {
 
 	// Leg 3: the delegated agent-user token, carrying leg 1 as the client
 	// assertion and leg 2 as the user federated credential, scoped to the ADO
-	// resource.
+	// resource. client_assertion_type is required here too (live Entra: AADSTS900144
+	// if absent) — the same jwt-bearer constant leg 2 uses.
 	wantLeg3 := newForm(
 		"client_id", testAgentID,
 		"grant_type", "user_fic",
+		"client_assertion_type", clientAssertionType,
 		"client_assertion", t1,
 		"user_id", testAgentUser,
 		"user_federated_identity_credential", t2,
