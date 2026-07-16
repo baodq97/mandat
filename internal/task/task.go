@@ -203,8 +203,18 @@ func (tc *TaskContract) Validate() error {
 		add("remit.paths", "at least one remit path is required")
 	}
 	for i, p := range tc.Remit.Paths {
+		fieldPath := fmt.Sprintf("remit.paths[%d]", i)
 		if p == "" {
-			add(fmt.Sprintf("remit.paths[%d]", i), "must not be empty")
+			add(fieldPath, "must not be empty")
+		}
+		if strings.HasPrefix(p, "/") {
+			add(fieldPath, "must not be an absolute path")
+		}
+		for _, seg := range strings.Split(p, "/") {
+			if seg == ".." {
+				add(fieldPath, "must not contain a parent-directory (\"..\") segment")
+				break
+			}
 		}
 	}
 	if tc.AssignedTo == "" {
