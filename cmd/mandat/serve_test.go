@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -518,6 +519,51 @@ func TestWalkingSkeleton_ReviewerProbe_CreatedByMismatchHolds(t *testing.T) {
 	}
 }
 
+// TestWalkingSkeleton_VerifyOperationalErrorHolds proves the silent-hold gap is
+// closed: when the probe's FindPR fails as a transport error (distinct from a
+// failed-check Verdict), the task must not stay in-progress forever with no
+// journal act and no tracker feedback. It must journal a verify_error act
+// carrying the error text, transition to needs-human, and attempt a hold
+// comment — the same shape the setup-failed path uses.
+func TestWalkingSkeleton_VerifyOperationalErrorHolds(t *testing.T) {
+	deps, ado, tc := newSkeleton(t, "completed")
+	deps.Verifier = verify.New(&fakeProbe{identity: reviewerUser, err: errors.New("transport: connection reset by peer")})
+	ctx := context.Background()
+
+	state, err := runTask(ctx, deps, tc)
+	if err != nil {
+		t.Fatalf("runTask() error = %v", err)
+	}
+	if state != orchestrator.StateNeedsHuman {
+		t.Fatalf("final state = %q, want %q", state, orchestrator.StateNeedsHuman)
+	}
+
+	events, err := deps.Store.Events(ctx, tc.ID)
+	if err != nil {
+		t.Fatalf("Events() error = %v", err)
+	}
+	ve := findAct(events, actVerifyError)
+	if ve == nil {
+		t.Fatal("verify_error act was not journaled")
+	}
+	if !strings.Contains(string(ve.Detail), "transport: connection reset by peer") {
+		t.Errorf("verify_error detail = %s, want it to carry the probe's error text", ve.Detail)
+	}
+
+	ri := findAct(events, string(orchestrator.EventResultInvalid))
+	if ri == nil || ri.ToState != string(orchestrator.StateNeedsHuman) {
+		t.Errorf("result_invalid row = %+v, want to_state needs-human", ri)
+	}
+
+	comments := ado.commentCalls()
+	if len(comments) != 3 {
+		t.Fatalf("Comment calls = %v, want 3 (dispatch + PR opened + verify-error hold)", comments)
+	}
+	if !strings.Contains(comments[2], "held task") || !strings.Contains(comments[2], "transport: connection reset by peer") {
+		t.Errorf("hold comment = %q, want it to name the held task and the verify error", comments[2])
+	}
+}
+
 func openStore(t *testing.T) *journal.Store {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "mandat.db")
@@ -691,14 +737,20 @@ func (f *fakeTokenProvider) Token(_ context.Context, _ string) (string, error) {
 // fakeProbe stands in for the Reviewer-identity PR-existence probe: it reports the
 // principal it acts as (distinct from the Dev agent user) and a scripted finding, so
 // the verifier's writer != scorer certification runs without a second live agent.
+// A non-nil err scripts a transport failure instead of a finding, standing in for
+// the FindPR probe erroring out rather than returning a Verdict.
 type fakeProbe struct {
 	identity string
 	info     verify.PRInfo
+	err      error
 }
 
 func (f *fakeProbe) Identity() string { return f.identity }
 
 func (f *fakeProbe) FindPR(_ context.Context, _ verify.PRRef) (verify.PRInfo, error) {
+	if f.err != nil {
+		return verify.PRInfo{}, f.err
+	}
 	return f.info, nil
 }
 

@@ -52,6 +52,7 @@ const (
 	actPROpened      = "pr_opened"
 	actGateRerun     = "gate_rerun"
 	actProbePRExists = "probe_pr_exists"
+	actVerifyError   = "verify_error"
 )
 
 // The pipeline plane seams runTask keys off, each narrowed to the methods the
@@ -217,7 +218,21 @@ func runTask(ctx context.Context, d serveDeps, tc task.TaskContract) (orchestrat
 		Remit:       ws,
 	})
 	if err != nil {
-		return state, fmt.Errorf("serve: verify task %s: %w", tc.ID, err)
+		// An operational error (e.g. the PR probe's transport failing) is distinct
+		// from a failed-check Verdict: it means verification never rendered a
+		// verdict at all, so the task must not sit in-progress forever. Route it to
+		// needs-human via the same transition+hold-comment mechanism the
+		// setup-failed path above uses, reusing result_invalid (the existing event
+		// for "the pipeline could not vouch for this run") since setup_failed itself
+		// has no in-progress edge.
+		if jErr := d.journalAct(ctx, &tc, out.RunID, systemOrchestrator, actVerifyError,
+			detailJSON(map[string]any{"error": err.Error()})); jErr != nil {
+			return state, jErr
+		}
+		to, tErr := d.transition(ctx, &tc, state, orchestrator.EventResultInvalid, out.RunID,
+			detailJSON(map[string]any{"error": err.Error()}))
+		d.postHoldComment(ctx, &tc, err.Error())
+		return to, tErr
 	}
 	if len(verdict.Gates) > 0 {
 		if err := d.journalAct(ctx, &tc, out.RunID, d.ReviewerIdentity, actGateRerun,
