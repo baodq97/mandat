@@ -37,7 +37,7 @@ func writeStreamTail(controlDir string, stdout []byte) error {
 		return fmt.Errorf("runner: create control dir %s: %w", controlDir, err)
 	}
 	path := filepath.Join(controlDir, streamTailFile)
-	if err := os.WriteFile(path, streamTail(stdout), 0o644); err != nil {
+	if err := os.WriteFile(path, streamTail(stdout), 0o600); err != nil {
 		return fmt.Errorf("runner: write stream tail %s: %w", path, err)
 	}
 	return nil

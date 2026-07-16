@@ -12,7 +12,7 @@ import (
 func TestStreamTail_CapsEventCount(t *testing.T) {
 	var stdout bytes.Buffer
 	const n = maxStreamTailEvents + 50
-	for i := 0; i < n; i++ {
+	for i := range n {
 		stdout.WriteString(`{"seq":` + strconv.Itoa(i) + "}\n")
 	}
 
@@ -34,7 +34,7 @@ func TestStreamTail_CapsEventCount(t *testing.T) {
 func TestStreamTail_CapsByteSize(t *testing.T) {
 	var stdout bytes.Buffer
 	const lineSize = 10 << 10 // 10KB per line, 10 lines = 100KB > 64KB cap
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		stdout.WriteString(`{"seq":` + strconv.Itoa(i) + `,"pad":"` + strings.Repeat("a", lineSize) + "\"}\n")
 	}
 
