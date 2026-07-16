@@ -145,8 +145,11 @@ func TestCreatePR_PostsDraftPRUnderBearer(t *testing.T) {
 	if res.ID != 7 {
 		t.Errorf("result id = %d, want 7", res.ID)
 	}
-	if res.URL != "https://dev.azure.com/baodo0220/mandat/_apis/git/repositories/mandat/pullRequests/7" {
-		t.Errorf("result url = %q, want the PR url from the 201 body", res.URL)
+	if !strings.HasSuffix(res.URL, "/baodo0220/mandat/_git/mandat/pullrequest/7") {
+		t.Errorf("result url = %q, want the human web URL .../baodo0220/mandat/_git/mandat/pullrequest/7", res.URL)
+	}
+	if strings.Contains(res.URL, "_apis") {
+		t.Errorf("result url = %q, want the human web form, not the API self-link", res.URL)
 	}
 	if res.CreatedBy != devAgentUser {
 		t.Errorf("result createdBy = %q, want the Dev agent user %q", res.CreatedBy, devAgentUser)

@@ -113,6 +113,9 @@ func TestWalkingSkeleton_HappyPath(t *testing.T) {
 	if !strings.Contains(string(pr.Detail), devUser) {
 		t.Errorf("pr_opened detail = %s, want createdBy = the Dev agent user", pr.Detail)
 	}
+	if !strings.Contains(string(pr.Detail), "_git/mandat/pullrequest/7") {
+		t.Errorf("pr_opened detail = %s, want the human web URL, not the API self-link", pr.Detail)
+	}
 	if !ado.prCreated() {
 		t.Error("no draft-PR POST reached the recorded ADO fixture")
 	}
@@ -161,8 +164,8 @@ func TestWalkingSkeleton_HappyPath(t *testing.T) {
 	if !strings.Contains(comments[0], tc.ID) || !strings.Contains(comments[0], "dev") {
 		t.Errorf("dispatch comment = %q, want it to name task %s and role %q", comments[0], tc.ID, "dev")
 	}
-	if !strings.Contains(comments[1], "pullRequests/7") {
-		t.Errorf("PR comment = %q, want it to carry the created PR's URL", comments[1])
+	if !strings.Contains(comments[1], "_git/mandat/pullrequest/7") {
+		t.Errorf("PR comment = %q, want it to carry the created PR's human web URL", comments[1])
 	}
 }
 
