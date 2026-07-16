@@ -17,7 +17,8 @@ hand-written YAML.
 
 ## Source
 
-Design spec §4.10 ("install time is one download... setup time is one command"); RFC-0001.
+`docs/research/cli-first-run-survey.md` (peer survey, 26 tools, 2026-07-16). Design spec
+§4.10 ("install time is one download... setup time is one command"); RFC-0001.
 `internal/config/config.go` (the loader `init` must satisfy: `Load`, `applyDefaults`,
 `validate`, `FieldError`). `cmd/mandat/doctor.go` (the checks `init` runs at the end).
 GETTING-STARTED.md (the current manual runbook this story partially replaces). US-0009
@@ -73,7 +74,9 @@ GETTING-STARTED §2, the manual runbook this covers) is deferred to a phase 2 st
 Graph agent-identity surface is beta and the ceremony needs a Global Administrator
 delegated token that `init` running as the operator does not hold. Automating it needs its
 own spike and RFC to settle the token-acquisition and consent model, not a silent extension
-of this story's scope.
+of this story's scope. Phase-2 design target: config-writing and token-minting stay
+separate commands, mirroring the `aws configure sso` / `aws sso login` split (survey
+patterns 1, 11).
 
 ## Acceptance criteria
 
@@ -81,7 +84,10 @@ of this story's scope.
       organization, running `mandat init` discovers that org, its accessible projects, and
       their repo urls without the operator retyping them, and falls back to a prompt for
       any value discovery cannot resolve (no ADO org reachable, ambiguous project match, or
-      an unreachable git remote).
+      an unreachable git remote). Before writing, `init` validates the discovered
+      token/tenant against a real ADO endpoint and refuses to write `config.yaml` when
+      validation fails; the implementer pins the exact `az`-derived discovery chain used
+      (subcommands, scope) and names it in the PR that lands this story.
 - [ ] AC-13.2 Given a completed `init` interview, observe the written `/etc/mandat/config.yaml`
       parses and passes `config.Load` unmodified, and every optional field present in the
       file (every `omitempty`-tagged key in `internal/config/config.go`) carries an adjacent
@@ -111,12 +117,39 @@ of this story's scope.
 - [ ] AC-13.7 Given a completed `init` run, observe it invokes the same check functions
       `mandat doctor` runs (`cmd/mandat/doctor.go`'s `claudeVersionCheck`,
       `gitVersionCheck`, `sqliteCheck`, `trackerCheckFor`, `reviewerIdentityCheck`,
-      `diskCheck`) against the config it just wrote, and prints the identical
-      CHECK/STATUS/DETAIL table shape, so a green `init` run is evidence, not a claim.
+      `diskCheck`) against the config it just wrote — no second validator set — and prints
+      the identical CHECK/STATUS/DETAIL table shape, so a green `init` run is evidence, not
+      a claim. `init` exits non-zero when any check reports FAIL: a sharp tri-state
+      (`flutter doctor`'s model), never `brew doctor`'s advisory shrug, because this gates
+      Entra identity and worktree isolation.
 - [ ] AC-13.8 GETTING-STARTED.md shrinks: steps 5 (write the config), the playbook
       sub-step of step 5, and step 7's unit-file sub-step collapse into one step that
       runs `mandat init` and answers its prompts; step 2 (Entra provisioning) is unchanged
       and stays the longest step in the document, matching this story's phase-1 scope.
+- [ ] AC-13.9 Given `mandat init --non-interactive`, observe it requires every irreducible
+      field (tracker org/project, repo url + remit paths + gates, per-role identity
+      ids/UPNs) as a flag and errors naming the specific missing flag instead of prompting.
+      Given stdin is not a TTY, observe `init` behaves as if `--non-interactive` was passed,
+      so it never hangs in CI.
+- [ ] AC-13.10 Given `MANDAT_*` environment variables set for any init input, observe
+      `init` accepts them with precedence flags > env > existing config values, and observe
+      env inputs carry non-secret values only. Env vars feed the interview only: the
+      written `config.yaml` remains the sole runtime source, and `mandat serve` never reads
+      governed settings (remits, ceilings) from environment variables.
+- [ ] AC-13.11 Given a second `init` run over an existing `/etc/mandat/config.yaml`,
+      observe each existing value is presented as the bracketed prompt default (Enter keeps
+      it), and observe fields the operator does not change come out byte-identical to the
+      file before the rerun.
+- [ ] AC-13.12 Given `init` is about to write, observe it prints a diff of what will change
+      in `config.yaml` and asks for confirmation before writing; given `--yes`, observe the
+      confirmation is skipped for automation; given a fresh install with no existing file,
+      observe the diff shown is the whole file.
+- [ ] AC-13.13 Given a completed `init` run finishes printing the doctor table, observe it
+      prints the next command to run and a security note naming the Entra identities and
+      remit paths this VM now operates under.
+- [ ] AC-13.14 Given `install.sh` completes, observe it prints the next step
+      (`mandat init`) after running `mandat version`, and observe it never auto-launches
+      the init wizard or mutates `config.yaml` itself.
 
 ## Remit
 
@@ -141,12 +174,7 @@ after those land.
 
 - The discovery mechanism for "the operator's existing az-derived token" (which `az`
   subcommands, what scope, how failure is distinguished from "no such credential") is not
-  pinned by any source read for this story; the implementer names the exact discovery
-  calls and their fallback behavior.
-- Whether `init` is idempotent on a second run against an existing `/etc/mandat/config.yaml`
-  (spec §4.10 states re-running `init` "updates config in place and never destroys state")
-  is not covered by this story's acceptance criteria; a first-run-only implementation
-  satisfies AC-13.1 through AC-13.8, and idempotent re-run is flagged here as a follow-up
-  the doc owner may fold into this story or split into its own.
+  pinned by any source read for this story; AC-13.1 now requires the implementer to name
+  the exact discovery chain and its fallback behavior in the PR that lands it.
 - Phase 2 (automating the Entra provisioning ceremony) has no spike or RFC yet; this story
   does not open one, it only records the boundary in "Out of scope".
