@@ -78,6 +78,10 @@ const (
 // dispatch, before the runner spawns.
 const defaultInProgressState = "Doing"
 
+// defaultPoolSize is what runner.pool_size resolves to when config.yaml
+// omits it or sets it to zero (US-0012 AC-12.1).
+const defaultPoolSize = 1
+
 // TrackerStatesConfig names the work-item states serve writes back onto the
 // source work item as a run's lifecycle advances (US-0018). It carries no
 // done/completed state: mandat never writes one (RFC-0001 §Human plane —
@@ -98,6 +102,16 @@ type TrackerConfig struct {
 // AuthConfig names the credential path token acquisition uses (spec §4.10).
 type AuthConfig struct {
 	Mode AuthMode `yaml:"mode"`
+}
+
+// RunnerConfig bounds how many runs a mandat installation drives at once
+// (RFC-0001 post-acceptance amendment 2026-07-16: single-VM concurrent
+// dispatch).
+type RunnerConfig struct {
+	// PoolSize bounds concurrent in-flight tasks; 1 is bit-compatible with
+	// the pre-amendment single-in-flight scope (RFC-0001 post-acceptance
+	// amendment 2026-07-16).
+	PoolSize int `yaml:"pool_size,omitempty"`
 }
 
 // EntraConfig names the Entra tenant, agent-identity blueprint, and
@@ -147,6 +161,10 @@ type RoleConfig struct {
 // placeholder, the productionized per-role value is an open question).
 type BudgetConfig struct {
 	MaxUSDPerRun float64 `yaml:"max_usd_per_run"`
+	// MaxUSDInFlight caps total cost across all concurrently in-flight runs
+	// (US-0012 AC-12.8). Zero means "derive": consumers treat the effective
+	// ceiling as runner.pool_size * budget.max_usd_per_run when unset.
+	MaxUSDInFlight float64 `yaml:"max_usd_in_flight,omitempty"`
 }
 
 // NotificationConfig names where the human plane's notifications go
@@ -165,6 +183,7 @@ type Config struct {
 	Entra         EntraConfig           `yaml:"entra"`
 	Repos         map[string]RepoConfig `yaml:"repos"`
 	Roles         map[string]RoleConfig `yaml:"roles"`
+	Runner        RunnerConfig          `yaml:"runner,omitempty"`
 	Budget        BudgetConfig          `yaml:"budget"`
 	Notifications NotificationConfig    `yaml:"notifications,omitempty"`
 }
@@ -247,6 +266,9 @@ func (c *Config) applyDefaults() {
 	if c.Tracker.States.InProgress == "" {
 		c.Tracker.States.InProgress = defaultInProgressState
 	}
+	if c.Runner.PoolSize == 0 {
+		c.Runner.PoolSize = defaultPoolSize
+	}
 }
 
 func (c *Config) validate() ValidationErrors {
@@ -261,8 +283,15 @@ func (c *Config) validate() ValidationErrors {
 	c.validateRepos(add)
 	c.validateRoles(add)
 
+	if c.Runner.PoolSize < 0 {
+		add("runner.pool_size", "must not be negative")
+	}
+
 	if c.Budget.MaxUSDPerRun <= 0 {
 		add("budget.max_usd_per_run", "must be greater than zero")
+	}
+	if c.Budget.MaxUSDInFlight != 0 && c.Budget.MaxUSDInFlight < c.Budget.MaxUSDPerRun {
+		add("budget.max_usd_in_flight", "must be greater than or equal to budget.max_usd_per_run")
 	}
 
 	return errs
