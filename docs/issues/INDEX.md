@@ -12,5 +12,5 @@
 | [US-0008](US-0008-identity-broker-git-credential.md) | Identity broker — ADR-0005 token mint, tracker MCP wiring, git credential delivery | open | TBD | 2026-07-16 |
 | [US-0009](US-0009-config-role-doctor.md) | Config, role resolution, and mandat doctor | open | TBD | 2026-07-16 |
 | [US-0010](US-0010-cmd-wiring-end-to-end.md) | cmd wiring — serve dispatch loop running the skeleton end to end | open | TBD | 2026-07-16 |
-| [US-0011](US-0011-tracker-lifecycle-feedback.md) | Tracker lifecycle feedback — in-progress state, PR link, and outcome comments | open | baodq97 | 2026-07-16 |
+| [US-0011](US-0011-tracker-lifecycle-feedback.md) | Tracker lifecycle feedback — in-progress state, PR link, and outcome comments | done | baodq97 | 2026-07-16 |
 | [US-0012](US-0012-concurrent-task-dispatch.md) | Concurrent task dispatch (runner pool slice) | done | baodq97 | 2026-07-16 |

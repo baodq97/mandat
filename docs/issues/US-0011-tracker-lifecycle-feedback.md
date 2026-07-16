@@ -1,7 +1,7 @@
 ---
 id: US-0011
 title: Tracker lifecycle feedback — in-progress state, PR link, and outcome comments
-status: open
+status: done
 owner: baodq97
 date: 2026-07-16
 priority: P1
