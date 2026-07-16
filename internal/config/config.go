@@ -8,6 +8,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -328,6 +329,19 @@ func (c *Config) validateRepos(add func(path, reason string)) {
 			// materialized, not a permissive default (ADR-0004 exception 2:
 			// security boundaries invest past minimal).
 			add(p+".paths", "at least one remit path is required")
+		}
+		// A malformed registry path today surfaces only at poll time, as a
+		// silent per-work-item skip (RFC-0001 AC-08). Mirroring
+		// task.Validate's remit.paths checks here catches it at config load
+		// instead, before any work item ever resolves through this entry.
+		for i, path := range rc.Paths {
+			fieldPath := fmt.Sprintf("%s.paths[%d]", p, i)
+			if strings.HasPrefix(path, "/") {
+				add(fieldPath, "must not be an absolute path")
+			}
+			if slices.Contains(strings.Split(path, "/"), "..") {
+				add(fieldPath, "must not contain a parent-directory (\"..\") segment")
+			}
 		}
 	}
 }

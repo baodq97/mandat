@@ -144,10 +144,8 @@ func runTask(ctx context.Context, d serveDeps, tc task.TaskContract) (orchestrat
 	// retry (spec §4.5, RFC-0001 AC-18).
 	ws, err := d.provision(ctx, &tc)
 	if err != nil {
-		to, tErr := d.transition(ctx, &tc, state, orchestrator.EventSetupFailed, "",
-			detailJSON(map[string]any{"error": err.Error()}))
-		d.postHoldComment(ctx, &tc, err.Error())
-		return to, tErr
+		return d.holdForHuman(ctx, &tc, state, orchestrator.EventSetupFailed, "",
+			detailJSON(map[string]any{"error": err.Error()}), err.Error())
 	}
 	state, err = d.transition(ctx, &tc, state, orchestrator.EventClaimOK, "", nil)
 	if err != nil {
@@ -176,9 +174,7 @@ func runTask(ctx context.Context, d serveDeps, tc task.TaskContract) (orchestrat
 		if out.Result != nil && out.Result.Reason != "" {
 			detail = map[string]any{"reason": out.Result.Reason}
 		}
-		to, tErr := d.transition(ctx, &tc, state, out.Event, out.RunID, detailJSON(detail))
-		d.postHoldComment(ctx, &tc, runReason(out))
-		return to, tErr
+		return d.holdForHuman(ctx, &tc, state, out.Event, out.RunID, detailJSON(detail), runReason(out))
 	}
 
 	// The runner reported a valid completed ResultContract. Open the draft PR under
@@ -229,10 +225,8 @@ func runTask(ctx context.Context, d serveDeps, tc task.TaskContract) (orchestrat
 			detailJSON(map[string]any{"error": err.Error()})); jErr != nil {
 			return state, jErr
 		}
-		to, tErr := d.transition(ctx, &tc, state, orchestrator.EventResultInvalid, out.RunID,
-			detailJSON(map[string]any{"error": err.Error()}))
-		d.postHoldComment(ctx, &tc, err.Error())
-		return to, tErr
+		return d.holdForHuman(ctx, &tc, state, orchestrator.EventResultInvalid, out.RunID,
+			detailJSON(map[string]any{"error": err.Error()}), err.Error())
 	}
 	if len(verdict.Gates) > 0 {
 		if err := d.journalAct(ctx, &tc, out.RunID, d.ReviewerIdentity, actGateRerun,
@@ -246,10 +240,8 @@ func runTask(ctx context.Context, d serveDeps, tc task.TaskContract) (orchestrat
 	// runner already reported completed (RFC-0001 state machine: result_ok is
 	// conditioned on gates green AND diff-in-remit AND the probe confirming).
 	if verdict.Event != orchestrator.EventResultOK {
-		to, tErr := d.transition(ctx, &tc, state, verdict.Event, out.RunID,
-			detailJSON(map[string]any{"check": string(verdict.Failed), "detail": verdict.Detail}))
-		d.postHoldComment(ctx, &tc, verdict.Detail)
-		return to, tErr
+		return d.holdForHuman(ctx, &tc, state, verdict.Event, out.RunID,
+			detailJSON(map[string]any{"check": string(verdict.Failed), "detail": verdict.Detail}), verdict.Detail)
 	}
 	if err := d.journalAct(ctx, &tc, out.RunID, d.ReviewerIdentity, actProbePRExists,
 		detailJSON(map[string]any{"pr_url": verdict.PR.URL, "created_by": verdict.PR.CreatedBy})); err != nil {
@@ -314,6 +306,16 @@ func (d serveDeps) transition(ctx context.Context, tc *task.TaskContract, from o
 		return from, err
 	}
 	return to, nil
+}
+
+// holdForHuman transitions the task to a needs-human state and posts the
+// reason as a best-effort tracker comment. Every needs-human hold in runTask
+// routes through this one method so a future hold path cannot forget the
+// reason comment (US-0018).
+func (d serveDeps) holdForHuman(ctx context.Context, tc *task.TaskContract, from orchestrator.State, event orchestrator.Event, runID string, detail []byte, reason string) (orchestrator.State, error) {
+	to, err := d.transition(ctx, tc, from, event, runID, detail)
+	d.postHoldComment(ctx, tc, reason)
+	return to, err
 }
 
 func (d serveDeps) journalTransition(ctx context.Context, tc *task.TaskContract, from, to orchestrator.State, event orchestrator.Event, runID string, detail []byte) error {
@@ -474,6 +476,24 @@ func dispatchCycle(ctx context.Context, d serveDeps, stdout, stderr io.Writer) {
 	}
 }
 
+// newRoleAdapter builds the azuredevops Adapter for role, scoped to the
+// installation's tracker org/project and identity broker. The Dev tracker/forge
+// adapter, the Reviewer-identity PR probe, and doctor's tracker-reachability
+// check each construct one of these under a different role and agent user, so
+// sharing this literal keeps the three constructions in lockstep by
+// construction rather than by convention.
+func newRoleAdapter(cfg *config.Config, broker *identity.Broker, role, agentUserName string) (*azuredevops.Adapter, error) {
+	return azuredevops.New(azuredevops.Config{
+		BaseURL:       adoBaseURL,
+		Org:           cfg.Tracker.Org,
+		Project:       cfg.Tracker.Project,
+		Role:          role,
+		AgentUserName: agentUserName,
+		Tokens:        broker,
+		Remits:        cfg,
+	})
+}
+
 // buildServeDeps wires the real planes from the loaded config. Several seams are
 // gated stubs pending their spikes/stories — the managed-identity blueprint
 // credential (ADR-0005 prod path), the Reviewer-identity PR probe (needs an ADO
@@ -497,15 +517,7 @@ func buildServeDeps(cfg *config.Config, store *journal.Store, roleName string, m
 	if err != nil {
 		return serveDeps{}, fmt.Errorf("serve: build broker: %w", err)
 	}
-	adapter, err := azuredevops.New(azuredevops.Config{
-		BaseURL:          adoBaseURL,
-		Org:              cfg.Tracker.Org,
-		Project:          cfg.Tracker.Project,
-		Role:             roleName,
-		DevAgentUserName: r.Mandate.AgentUserName,
-		Tokens:           broker,
-		Remits:           cfg,
-	})
+	adapter, err := newRoleAdapter(cfg, broker, roleName, r.Mandate.AgentUserName)
 	if err != nil {
 		return serveDeps{}, fmt.Errorf("serve: build tracker adapter: %w", err)
 	}
@@ -599,15 +611,7 @@ func buildReviewerProbe(cfg *config.Config, broker *identity.Broker, reviewerIde
 	if !ok {
 		return reviewerProbeStub{identity: reviewerIdentity}, nil
 	}
-	adapter, err := azuredevops.New(azuredevops.Config{
-		BaseURL:          adoBaseURL,
-		Org:              cfg.Tracker.Org,
-		Project:          cfg.Tracker.Project,
-		Role:             "reviewer",
-		DevAgentUserName: rc.AgentUserName,
-		Tokens:           broker,
-		Remits:           cfg,
-	})
+	adapter, err := newRoleAdapter(cfg, broker, "reviewer", rc.AgentUserName)
 	if err != nil {
 		return nil, fmt.Errorf("serve: build reviewer adapter: %w", err)
 	}

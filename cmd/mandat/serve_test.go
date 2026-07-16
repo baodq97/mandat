@@ -378,13 +378,13 @@ func newSkeleton(t *testing.T, scenario string) (serveDeps, *fakeADO, task.TaskC
 		},
 	}
 	adapter, err := azuredevops.New(azuredevops.Config{
-		BaseURL:          ado.srv.URL,
-		Org:              skeletonOrg,
-		Project:          skeletonProject,
-		Role:             "dev",
-		DevAgentUserName: devUser,
-		Tokens:           &fakeTokenProvider{token: "fake-delegated-token"},
-		Remits:           registry,
+		BaseURL:       ado.srv.URL,
+		Org:           skeletonOrg,
+		Project:       skeletonProject,
+		Role:          "dev",
+		AgentUserName: devUser,
+		Tokens:        &fakeTokenProvider{token: "fake-delegated-token"},
+		Remits:        registry,
 	})
 	if err != nil {
 		t.Fatalf("azuredevops.New() error = %v", err)
@@ -444,13 +444,13 @@ func newSkeletonWithReviewerAdapter(t *testing.T, scenario string) (serveDeps, *
 	deps, ado, tc := newSkeleton(t, scenario)
 
 	reviewerAdapter, err := azuredevops.New(azuredevops.Config{
-		BaseURL:          ado.srv.URL,
-		Org:              skeletonOrg,
-		Project:          skeletonProject,
-		Role:             "reviewer",
-		DevAgentUserName: reviewerUser,
-		Tokens:           &fakeTokenProvider{token: "fake-delegated-reviewer-token"},
-		Remits:           &config.Config{},
+		BaseURL:       ado.srv.URL,
+		Org:           skeletonOrg,
+		Project:       skeletonProject,
+		Role:          "reviewer",
+		AgentUserName: reviewerUser,
+		Tokens:        &fakeTokenProvider{token: "fake-delegated-reviewer-token"},
+		Remits:        &config.Config{},
 	})
 	if err != nil {
 		t.Fatalf("azuredevops.New() reviewer adapter error = %v", err)

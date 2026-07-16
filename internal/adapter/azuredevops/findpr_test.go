@@ -9,26 +9,10 @@ import (
 )
 
 // pullRequestsList7 is the canned pullrequests-list response for a found PR —
-// the §9 recorded-ADO double for FindPR, reusing pullRequest7's createdBy so
-// both fixtures agree on the Dev agent user.
-const pullRequestsList7 = `{
-  "count": 1,
-  "value": [
-    {
-      "pullRequestId": 7,
-      "status": "active",
-      "isDraft": true,
-      "sourceRefName": "refs/heads/mandat/task-42",
-      "targetRefName": "refs/heads/main",
-      "url": "https://dev.azure.com/baodo0220/mandat/_apis/git/repositories/mandat/pullRequests/7",
-      "createdBy": {
-        "id": "8c5e2f1a-0000-4000-8000-000000000001",
-        "displayName": "Dev Agent 01",
-        "uniqueName": "agent-user-dev-01@baotest.onmicrosoft.com"
-      }
-    }
-  ]
-}`
+// the §9 recorded-ADO double for FindPR. It wraps forge_test.go's pullRequest7
+// verbatim, so the id-7 PR object has one source shared with CreatePR's own
+// fixture rather than a second hand-kept copy that could drift from it.
+const pullRequestsList7 = `{"count":1,"value":[` + pullRequest7 + `]}`
 
 // pullRequestsListEmpty is the canned response for a branch with no matching
 // PR — the not-found case FindPR must map to Exists=false, nil error.
@@ -165,13 +149,13 @@ func TestFindPR_MintsTokenUnderAdapterRole(t *testing.T) {
 	srv, _ := prServer(t, http.StatusOK, pullRequestsList7)
 	tp := &fakeTokenProvider{token: testToken}
 	a, err := New(Config{
-		BaseURL:          srv.URL,
-		Org:              testOrg,
-		Project:          testProject,
-		Role:             "reviewer",
-		DevAgentUserName: devAgentUser,
-		Tokens:           tp,
-		Remits:           registry(),
+		BaseURL:       srv.URL,
+		Org:           testOrg,
+		Project:       testProject,
+		Role:          "reviewer",
+		AgentUserName: devAgentUser,
+		Tokens:        tp,
+		Remits:        registry(),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v, want nil", err)

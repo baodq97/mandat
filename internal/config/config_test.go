@@ -262,6 +262,20 @@ func TestLoad_RejectsInvalid(t *testing.T) {
 			wantSub: "repos",
 		},
 		{
+			name: "absolute repo path",
+			mutate: func(s string) string {
+				return strings.Replace(s, "      - internal/\n", "      - /internal/\n", 1)
+			},
+			wantSub: "repos.mandat.paths[0]",
+		},
+		{
+			name: "parent-directory repo path",
+			mutate: func(s string) string {
+				return strings.Replace(s, "      - internal/\n", "      - ../internal/\n", 1)
+			},
+			wantSub: "repos.mandat.paths[0]",
+		},
+		{
 			name: "empty role table",
 			mutate: func(s string) string {
 				i := strings.Index(s, "roles:")

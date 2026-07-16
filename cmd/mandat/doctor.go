@@ -13,7 +13,6 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/baodq97/mandat/internal/adapter/azuredevops"
 	"github.com/baodq97/mandat/internal/config"
 	"github.com/baodq97/mandat/internal/journal"
 	"github.com/baodq97/mandat/internal/role"
@@ -158,15 +157,7 @@ func trackerCheckFor(cfg *config.Config, roleName string) func(context.Context) 
 			return checkResult{name: name, required: true, detail: "build broker: " + berr.Error()}
 		}
 	}
-	adapter, aerr := azuredevops.New(azuredevops.Config{
-		BaseURL:          adoBaseURL,
-		Org:              cfg.Tracker.Org,
-		Project:          cfg.Tracker.Project,
-		Role:             roleName,
-		DevAgentUserName: r.Mandate.AgentUserName,
-		Tokens:           broker,
-		Remits:           cfg,
-	})
+	adapter, aerr := newRoleAdapter(cfg, broker, roleName, r.Mandate.AgentUserName)
 	if aerr != nil {
 		return func(context.Context) checkResult {
 			return checkResult{name: name, required: true, detail: "build adapter: " + aerr.Error()}

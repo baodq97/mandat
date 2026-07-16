@@ -240,14 +240,14 @@ func registry() *config.Config {
 func newAdapter(t *testing.T, srv *httptest.Server, tokens TokenProvider, logger *slog.Logger) *Adapter {
 	t.Helper()
 	a, err := New(Config{
-		BaseURL:          srv.URL,
-		Org:              testOrg,
-		Project:          testProject,
-		Role:             "dev",
-		DevAgentUserName: devAgentUser,
-		Tokens:           tokens,
-		Remits:           registry(),
-		Logger:           logger,
+		BaseURL:       srv.URL,
+		Org:           testOrg,
+		Project:       testProject,
+		Role:          "dev",
+		AgentUserName: devAgentUser,
+		Tokens:        tokens,
+		Remits:        registry(),
+		Logger:        logger,
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v, want nil", err)
@@ -546,7 +546,7 @@ func TestNew_RejectsMissingConfig(t *testing.T) {
 		t.Fatal("New() with an incomplete config: error = nil, want a missing-field error")
 	}
 	// One-pass validation names every gap, matching the config/task packages.
-	for _, field := range []string{"Org", "Project", "Role", "DevAgentUserName", "Tokens", "Remits"} {
+	for _, field := range []string{"Org", "Project", "Role", "AgentUserName", "Tokens", "Remits"} {
 		if !strings.Contains(err.Error(), field) {
 			t.Errorf("New() error = %q, want it to name missing field %q", err, field)
 		}

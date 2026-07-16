@@ -9,6 +9,7 @@ package task
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -210,11 +211,8 @@ func (tc *TaskContract) Validate() error {
 		if strings.HasPrefix(p, "/") {
 			add(fieldPath, "must not be an absolute path")
 		}
-		for _, seg := range strings.Split(p, "/") {
-			if seg == ".." {
-				add(fieldPath, "must not contain a parent-directory (\"..\") segment")
-				break
-			}
+		if slices.Contains(strings.Split(p, "/"), "..") {
+			add(fieldPath, "must not contain a parent-directory (\"..\") segment")
 		}
 	}
 	if tc.AssignedTo == "" {

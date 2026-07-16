@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 )
 
@@ -44,11 +45,6 @@ type CreatePRResult struct {
 // PAT, spike S3). The PR resource lives under _apis/git, not the _apis/wit area
 // endpoint() builds, so its path is assembled here.
 func (a *Adapter) CreatePR(ctx context.Context, in CreatePRInput) (CreatePRResult, error) {
-	u := a.base.JoinPath(a.org, a.project, "_apis", "git", "repositories", in.Repo, "pullrequests")
-	q := u.Query()
-	q.Set("api-version", apiVersion)
-	u.RawQuery = q.Encode()
-
 	req := createPRRequest{
 		SourceRefName: refHeadsPrefix + in.Branch,
 		TargetRefName: refHeadsPrefix + in.BaseBranch,
@@ -68,7 +64,7 @@ func (a *Adapter) CreatePR(ctx context.Context, in CreatePRInput) (CreatePRResul
 	}
 
 	var resp createPRResponse
-	if err := a.do(ctx, http.MethodPost, u.String(), jsonContentType, body, &resp); err != nil {
+	if err := a.do(ctx, http.MethodPost, a.pullRequestsURL(in.Repo).String(), jsonContentType, body, &resp); err != nil {
 		return CreatePRResult{}, fmt.Errorf("azuredevops: create pull request in repo %s: %w", in.Repo, err)
 	}
 	return CreatePRResult{
@@ -103,11 +99,10 @@ type PRFinding struct {
 // the highest pullRequestId (the newest) deterministically rather than
 // trusting response order.
 func (a *Adapter) FindPR(ctx context.Context, repo, branch string) (PRFinding, error) {
-	u := a.base.JoinPath(a.org, a.project, "_apis", "git", "repositories", repo, "pullrequests")
+	u := a.pullRequestsURL(repo)
 	q := u.Query()
 	q.Set("searchCriteria.sourceRefName", refHeadsPrefix+branch)
 	q.Set("searchCriteria.status", "active")
-	q.Set("api-version", apiVersion)
 	u.RawQuery = q.Encode()
 
 	var resp findPRResponse
@@ -135,6 +130,19 @@ func (a *Adapter) FindPR(ctx context.Context, repo, branch string) (PRFinding, e
 // (mirrors workItemURL's same distinction for work items).
 func (a *Adapter) pullRequestURL(repo string, id int) string {
 	return a.base.JoinPath(a.org, a.project, "_git", repo, "pullrequest", strconv.Itoa(id)).String()
+}
+
+// pullRequestsURL builds the .../{org}/{project}/_apis/git/repositories/{repo}/pullrequests
+// URL with the api-version query set, the _apis/git sibling of endpoint()'s
+// _apis/wit area. It returns a *url.URL rather than a string, unlike endpoint(),
+// because FindPR layers its own searchCriteria params on top of the api-version
+// query this helper already sets.
+func (a *Adapter) pullRequestsURL(repo string) *url.URL {
+	u := a.base.JoinPath(a.org, a.project, "_apis", "git", "repositories", repo, "pullrequests")
+	q := u.Query()
+	q.Set("api-version", apiVersion)
+	u.RawQuery = q.Encode()
+	return u
 }
 
 // findPRResponse is the pullrequests list envelope; each entry reuses
