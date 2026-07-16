@@ -236,13 +236,13 @@ func newSkeleton(t *testing.T, scenario string) (serveDeps, *fakeADO, task.TaskC
 		},
 	}
 	adapter, err := azuredevops.New(azuredevops.Config{
-		BaseURL:      ado.srv.URL,
-		Org:          skeletonOrg,
-		Project:      skeletonProject,
-		Role:         "dev",
-		DevAgentUser: devUser,
-		Tokens:       &fakeTokenProvider{token: "fake-delegated-token"},
-		Remits:       registry,
+		BaseURL:          ado.srv.URL,
+		Org:              skeletonOrg,
+		Project:          skeletonProject,
+		Role:             "dev",
+		DevAgentUserName: devUser,
+		Tokens:           &fakeTokenProvider{token: "fake-delegated-token"},
+		Remits:           registry,
 	})
 	if err != nil {
 		t.Fatalf("azuredevops.New() error = %v", err)

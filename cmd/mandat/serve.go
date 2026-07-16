@@ -416,13 +416,13 @@ func buildServeDeps(cfg *config.Config, store *journal.Store, roleName string, m
 
 	broker := buildBroker(cfg)
 	adapter, err := azuredevops.New(azuredevops.Config{
-		BaseURL:      adoBaseURL,
-		Org:          cfg.Tracker.Org,
-		Project:      cfg.Tracker.Project,
-		Role:         roleName,
-		DevAgentUser: r.Mandate.AgentUserName,
-		Tokens:       broker,
-		Remits:       cfg,
+		BaseURL:          adoBaseURL,
+		Org:              cfg.Tracker.Org,
+		Project:          cfg.Tracker.Project,
+		Role:             roleName,
+		DevAgentUserName: r.Mandate.AgentUserName,
+		Tokens:           broker,
+		Remits:           cfg,
 	})
 	if err != nil {
 		return serveDeps{}, fmt.Errorf("serve: build tracker adapter: %w", err)

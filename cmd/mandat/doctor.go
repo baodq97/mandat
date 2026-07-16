@@ -154,13 +154,13 @@ func trackerCheckFor(cfg *config.Config, roleName string) func(context.Context) 
 	}
 	broker := buildBroker(cfg)
 	adapter, aerr := azuredevops.New(azuredevops.Config{
-		BaseURL:      adoBaseURL,
-		Org:          cfg.Tracker.Org,
-		Project:      cfg.Tracker.Project,
-		Role:         roleName,
-		DevAgentUser: r.Mandate.AgentUserID,
-		Tokens:       broker,
-		Remits:       cfg,
+		BaseURL:          adoBaseURL,
+		Org:              cfg.Tracker.Org,
+		Project:          cfg.Tracker.Project,
+		Role:             roleName,
+		DevAgentUserName: r.Mandate.AgentUserName,
+		Tokens:           broker,
+		Remits:           cfg,
 	})
 	if aerr != nil {
 		return func(context.Context) checkResult {

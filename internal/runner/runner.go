@@ -191,7 +191,7 @@ func (s *Supervisor) run(ctx context.Context, req Request, sessionID string, res
 	}
 
 	if req.Role.Mandate.AgentUserName != "" {
-		if err := configureGitAuthor(ctx, req.Worktree.Dir, req.Role.Mandate.AgentUserName, req.Role.Mandate.AgentUserName); err != nil {
+		if err := configureGitAuthor(ctx, req.Worktree.Dir, req.Role.Mandate.AgentUserName); err != nil {
 			return Outcome{}, err
 		}
 	}
@@ -323,18 +323,7 @@ func deriveOutcome(resultPath string) (orchestrator.Event, *result.ResultContrac
 // task in flight (RFC-0001 §Scope), so this local-config write needs no
 // per-worktree isolation yet.
 func configureGitCredential(ctx context.Context, worktreeDir, helper string) error {
-	cmd := exec.CommandContext(ctx, "git", "-C", worktreeDir, "config", "credential.helper", helper)
-	cmd.Env = append(os.Environ(),
-		"GIT_TERMINAL_PROMPT=0",
-		"GIT_CONFIG_NOSYSTEM=1",
-		"GIT_CONFIG_GLOBAL=/dev/null",
-	)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("runner: configure git credential helper: %w (%s)", err, strings.TrimSpace(stderr.String()))
-	}
-	return nil
+	return gitConfig(ctx, worktreeDir, "credential.helper", helper)
 }
 
 // configureGitAuthor pins the worktree's commit author to the mandate's agent
@@ -343,22 +332,29 @@ func configureGitCredential(ctx context.Context, worktreeDir, helper string) err
 // it, `git commit` in the worktree inherits the OS pilot user's own global
 // gitconfig, breaking writer=agent-user attribution at the commit level even
 // though the PR creator (the push, over the agent-user token) is already
-// correct. Azure DevOps attributes a commit to an identity by author EMAIL,
-// so both user.name and user.email carry the agent user's UPN.
-func configureGitAuthor(ctx context.Context, worktreeDir, name, email string) error {
-	env := append(os.Environ(),
+// correct. Azure DevOps attributes a commit to an identity by author EMAIL, so
+// user.name and user.email both carry the agent user's UPN.
+func configureGitAuthor(ctx context.Context, worktreeDir, user string) error {
+	if err := gitConfig(ctx, worktreeDir, "user.name", user); err != nil {
+		return err
+	}
+	return gitConfig(ctx, worktreeDir, "user.email", user)
+}
+
+// gitConfig writes one value to the worktree's local git config under mandat's
+// hardened env (ambient global/system config stripped, prompts forbidden). It is
+// the single write path the credential-helper and commit-author setup share.
+func gitConfig(ctx context.Context, worktreeDir, key, value string) error {
+	cmd := exec.CommandContext(ctx, "git", "-C", worktreeDir, "config", key, value)
+	cmd.Env = append(os.Environ(),
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL=/dev/null",
 	)
-	for _, kv := range [][2]string{{"user.name", name}, {"user.email", email}} {
-		cmd := exec.CommandContext(ctx, "git", "-C", worktreeDir, "config", kv[0], kv[1])
-		cmd.Env = env
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("runner: configure git author %s: %w (%s)", kv[0], err, strings.TrimSpace(stderr.String()))
-		}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("runner: git config %s: %w (%s)", key, err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
 }

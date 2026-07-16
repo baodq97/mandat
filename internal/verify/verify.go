@@ -209,9 +209,6 @@ func (v *Verifier) Verify(ctx context.Context, req Request) (Verdict, error) {
 		return Verdict{}, fmt.Errorf("verify: probe identity %q equals the Dev agent user; writer must differ from scorer (RFC-0001 §4.1, §4.7)", id)
 	}
 
-	// Diff-inside-remit runs before the gate re-run: it reads the worktree exactly
-	// as the agent left it, before a gate can write anything into it, so a gate's
-	// own build artifacts can never be mistaken for the agent's escape.
 	if err := req.Remit.DiffInsideRemit(ctx); err != nil {
 		var rv *workspace.RemitViolationError
 		if errors.As(err, &rv) {

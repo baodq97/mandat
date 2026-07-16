@@ -72,19 +72,21 @@ type RemitSource interface {
 // (https://dev.azure.com in production, an httptest server in the contract
 // test); Org and Project scope every REST path; Role names the RoleAgent whose
 // token authorizes calls and whose key lands on each produced contract;
-// DevAgentUser is the agent-user principal WIQL filters assignment on (consent =
-// assignment, spec §4.2). Tokens and Remits are required injected seams;
+// DevAgentUserName is the agent user's tracker handle — its UPN, the value ADO
+// stores in System.AssignedTo — which WIQL filters assignment on (consent =
+// assignment, spec §4.2); it is NOT the Entra object id used to mint tokens.
+// Tokens and Remits are required injected seams;
 // HTTPClient and Logger default when nil.
 type Config struct {
-	BaseURL      string
-	Org          string
-	Project      string
-	Role         string
-	DevAgentUser string
-	Tokens       TokenProvider
-	Remits       RemitSource
-	HTTPClient   *http.Client
-	Logger       *slog.Logger
+	BaseURL          string
+	Org              string
+	Project          string
+	Role             string
+	DevAgentUserName string
+	Tokens           TokenProvider
+	Remits           RemitSource
+	HTTPClient       *http.Client
+	Logger           *slog.Logger
 }
 
 // Adapter is the Azure DevOps tracker.Tracker. It is safe for the single
@@ -92,15 +94,15 @@ type Config struct {
 // mutable state, so dedup of an already-seen work item rides the stable
 // contract id downstream, not adapter memory.
 type Adapter struct {
-	base         *url.URL
-	org          string
-	project      string
-	role         string
-	devAgentUser string
-	tokens       TokenProvider
-	remits       RemitSource
-	client       *http.Client
-	logger       *slog.Logger
+	base             *url.URL
+	org              string
+	project          string
+	role             string
+	devAgentUserName string
+	tokens           TokenProvider
+	remits           RemitSource
+	client           *http.Client
+	logger           *slog.Logger
 }
 
 var _ tracker.Tracker = (*Adapter)(nil)
@@ -122,8 +124,8 @@ func New(cfg Config) (*Adapter, error) {
 	if cfg.Role == "" {
 		missing = append(missing, "Role")
 	}
-	if cfg.DevAgentUser == "" {
-		missing = append(missing, "DevAgentUser")
+	if cfg.DevAgentUserName == "" {
+		missing = append(missing, "DevAgentUserName")
 	}
 	if cfg.Tokens == nil {
 		missing = append(missing, "Tokens")
@@ -153,15 +155,15 @@ func New(cfg Config) (*Adapter, error) {
 	}
 
 	return &Adapter{
-		base:         base,
-		org:          cfg.Org,
-		project:      cfg.Project,
-		role:         cfg.Role,
-		devAgentUser: cfg.DevAgentUser,
-		tokens:       cfg.Tokens,
-		remits:       cfg.Remits,
-		client:       client,
-		logger:       logger,
+		base:             base,
+		org:              cfg.Org,
+		project:          cfg.Project,
+		role:             cfg.Role,
+		devAgentUserName: cfg.DevAgentUserName,
+		tokens:           cfg.Tokens,
+		remits:           cfg.Remits,
+		client:           client,
+		logger:           logger,
 	}, nil
 }
 

@@ -54,9 +54,9 @@ func (a *Adapter) Poll(ctx context.Context) ([]task.TaskContract, error) {
 // consent stays in the tracker as assignment to an agent user).
 func (a *Adapter) queryAssigned(ctx context.Context) ([]wiqlRef, error) {
 	// WIQL string literals are single-quoted and escape an embedded quote by
-	// doubling it. devAgentUser is operator config, not attacker input, but the
+	// doubling it. devAgentUserName is operator config, not attacker input, but the
 	// escape keeps the query well-formed for any principal shape.
-	assigned := strings.ReplaceAll(a.devAgentUser, "'", "''")
+	assigned := strings.ReplaceAll(a.devAgentUserName, "'", "''")
 	query := fmt.Sprintf("SELECT [System.Id] FROM WorkItems WHERE [System.AssignedTo] = '%s'", assigned)
 
 	body, err := json.Marshal(map[string]string{"query": query})
@@ -92,7 +92,7 @@ func (a *Adapter) mapContract(ctx context.Context, wi *adoWorkItem) (task.TaskCo
 	// re-check on the fetched item keeps assignment to the dev agent user the
 	// only path to a dispatch even if the query ever widens. UPNs are
 	// case-insensitive, so compare fold-wise.
-	if !strings.EqualFold(wi.Fields.AssignedTo.UniqueName, a.devAgentUser) {
+	if !strings.EqualFold(wi.Fields.AssignedTo.UniqueName, a.devAgentUserName) {
 		a.skip(ctx, workItemID, "assigned_to no longer matches the dev agent user")
 		return task.TaskContract{}, false
 	}
