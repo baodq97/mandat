@@ -77,8 +77,8 @@ Two rungs (research doc, Principle 4, and Trade-offs). Rung 1, zero customizatio
 
 ## Sources
 
-- `docs/research/board-driven-sdlc-operating-model.md` (design synthesis and verified permission facts, 2026-07-16) — primary source.
-- `docs/research/ac-ownership-probe.md` (2026-07-16, verdict NOT VIABLE) — killed the AC-containment mechanism an earlier draft proposed; establishes AC as repo-canonical with a read-only card digest that cites its source AC-ids at write time.
+- `docs/research/board-driven-sdlc-operating-model.md` (design synthesis and verified permission facts, 2026-07-16), primary source.
+- `docs/research/ac-ownership-probe.md` (2026-07-16, verdict NOT VIABLE): killed the AC-containment mechanism an earlier draft proposed; establishes AC as repo-canonical with a read-only card digest that cites its source AC-ids at write time.
 - PRD-0001 (the mandate pipeline this operating model runs), spec §4.4 (ratification is the only stage-gate advance), RFC-0001 (the pipeline the board projects).
-- US-0013 (first-run init) and US-0014 (provisioning ladder) — adjacent chartered surfaces this PRD excludes by reference.
+- US-0013 (first-run init) and US-0014 (provisioning ladder), adjacent chartered surfaces this PRD excludes by reference.
 - Prose follows ADR-0003 (spare senior prose, active voice, quantified targets).
