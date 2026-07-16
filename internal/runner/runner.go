@@ -353,11 +353,17 @@ func configureGitAuthor(ctx context.Context, worktreeDir, user string) error {
 	return gitConfig(ctx, worktreeDir, "user.email", user)
 }
 
-// gitConfig writes one value to the worktree's local git config under mandat's
-// hardened env (ambient global/system config stripped, prompts forbidden). It is
-// the single write path the credential-helper and commit-author setup share.
+// gitConfig writes one value to the worktree's OWN config (--worktree scope)
+// under mandat's hardened env (ambient global/system config stripped, prompts
+// forbidden). The scope is load-bearing: a linked worktree's plain `git config`
+// writes the SHARED repo config, so under concurrent dispatch one task's
+// credential/author setup races a sibling's mirror heal on config.lock (live
+// pool=2 failure, US-0012). --worktree lands in the worktree's private
+// config.worktree instead; the provision path enables the required
+// extensions.worktreeConfig on every mirror. It is the single write path the
+// credential-helper and commit-author setup share.
 func gitConfig(ctx context.Context, worktreeDir, key, value string) error {
-	cmd := exec.CommandContext(ctx, "git", "-C", worktreeDir, "config", key, value)
+	cmd := exec.CommandContext(ctx, "git", "-C", worktreeDir, "config", "--worktree", key, value)
 	cmd.Env = append(os.Environ(),
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_CONFIG_NOSYSTEM=1",
