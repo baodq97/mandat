@@ -168,3 +168,28 @@ Format: `date | what escaped | where it should have been caught | lesson | encod
   measurement, spike note) landed in docs/research/ and cited as a Source;
   the red-team pass verifies the citation exists | CLAUDE.md governed-docs
   rule (this commit); the running survey feeds AC deltas back into US-0013
+- 2026-07-16 | While two subagents ran (a gate-verifier with
+  isolation:worktree that ran `git checkout refs/mandat/wi36`, and a
+  non-isolated spec-drafter), the lead's own `git commit` for the US-0008
+  flip landed on a DETACHED HEAD sitting on the init-slice branch, not on
+  main - the checkout had moved the shared worktree's HEAD. The mistake
+  nearly hid itself: `git push origin main` reported "Everything
+  up-to-date" (main was untouched at 789b695 while HEAD was elsewhere), and
+  only an explicit ls-remote vs rev-parse HEAD comparison caught that the
+  commit never reached the remote. Separately the non-isolated drafter
+  edited PRD-0002 inside the gate-verifier's worktree (it globbed the file
+  by absolute path and found the sibling copy), so its fold rode a locked
+  worktree, not main | two failures compound: (a) the lead interleaved its
+  own commits with tree-touching subagents (lesson 9/10 recurring -
+  isolation:worktree did NOT keep the shared HEAD safe once the agent's git
+  commands reached the shared repo), and (b) no pre-commit guard asserted
+  HEAD was on the intended branch, so a detached-HEAD commit committed
+  silently and a quiet push masked it | before ANY commit assert
+  `git symbolic-ref --short HEAD` == the intended branch (a detached HEAD
+  or wrong branch aborts the commit); never interleave lead commits with
+  running tree-touching agents - serialize, or give each a worktree AND
+  pin doc-edit agents to the main tree by explicit path so they cannot
+  wander into a sibling worktree; never trust a quiet "Everything
+  up-to-date" - verify remote SHA == local HEAD after every push | recovered
+  by saving the commit's pure-doc delta as a patch, resetting to main,
+  re-applying on the real branch; this entry
