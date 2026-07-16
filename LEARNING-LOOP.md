@@ -157,3 +157,14 @@ Format: `date | what escaped | where it should have been caught | lesson | encod
   or corrections with evidence); an AC nothing implements is drift to
   surface, not silence | this entry; harness fix pending owner's pick
   (release-ritual doc-keeper step vs a govkit staleness report)
+- 2026-07-16 | US-0013 (first-run init) was drafted and landed straight from
+  the owner's observation with zero research input: the peer survey (how
+  gitlab-runner, gcloud, gh, flyctl actually do first-run) only started when
+  the owner asked "research first", so the doc's ACs encode first-guess UX
+  rather than evidence | the doc pipeline's entry edge - the red-team pass
+  gates a status ADVANCE, but nothing gates DRAFTING on evidence, so
+  observation went straight to prescription | a governed doc that charters
+  new product surface starts from a research artifact (peer survey, repo
+  measurement, spike note) landed in docs/research/ and cited as a Source;
+  the red-team pass verifies the citation exists | CLAUDE.md governed-docs
+  rule (this commit); the running survey feeds AC deltas back into US-0013
