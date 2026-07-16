@@ -1,12 +1,12 @@
 // Package verify is the verification plane: the ground-truth scorer that decides
 // whether a completed run may advance to in-review (RFC-0001 §Definition of done,
 // AC-23..AC-27, §Verification). It turns a finished run's worktree and its
-// TaskContract into one orchestrator.Event by checking three independent grounds
-// of truth in the verifier's OWN context — the diff-inside-remit check, the gate
-// re-run, then the PR-existence probe, in that order so a gate's own side effects
-// (build artifacts a re-run writes into the worktree) can never be misread as the
-// agent's out-of-remit escape — and yields the result_ok-eligible event only when
-// all three pass.
+// TaskContract into one orchestrator.Event by checking four independent grounds
+// of truth in the verifier's OWN context — the ancestry check, the diff-inside-remit
+// check, the gate re-run, then the PR-existence probe, in that order so a gate's own
+// side effects (build artifacts a re-run writes into the worktree) can never be
+// misread as the agent's out-of-remit escape — and yields the result_ok-eligible
+// event only when all four pass.
 //
 // Two RFC-0001 invariants (§4.7, US-0007) shape this package and are worth
 // stating because the code cannot show them on its own:
@@ -50,9 +50,10 @@ type Check string
 
 // Enum values for Check, one per verification ground of truth.
 const (
-	CheckGate  Check = "gate"
-	CheckDiff  Check = "diff"
-	CheckProbe Check = "probe"
+	CheckGate     Check = "gate"
+	CheckDiff     Check = "diff"
+	CheckProbe    Check = "probe"
+	CheckAncestry Check = "ancestry"
 )
 
 // GateResult is one re-run gate command and the exit code the verifier observed.
@@ -104,6 +105,16 @@ type RemitChecker interface {
 	DiffInsideRemit(ctx context.Context) error
 }
 
+// AncestryChecker is the ancestry check: it reports a
+// *workspace.AncestryViolationError when the run worktree HEAD shares no merge
+// base with the base branch — an orphan or unrelated-history branch a
+// concurrent-provision defect can produce — and nil otherwise.
+// *workspace.Workspace satisfies it in production; tests inject a fake so the
+// ancestry outcome can be scripted independently of a live worktree.
+type AncestryChecker interface {
+	SharesMergeBase(ctx context.Context) error
+}
+
 // Request is one completed run to verify. It is deliberately the worktree and the
 // task, never a ResultContract: the verifier re-runs ground truth and never reads
 // the agent's self-report (ADR-0003).
@@ -130,6 +141,10 @@ type Request struct {
 	// Remit is the diff-inside-remit check for this run's worktree
 	// (*workspace.Workspace in production).
 	Remit RemitChecker
+
+	// Ancestry is the ancestry check for this run's worktree
+	// (*workspace.Workspace in production, the same value as Remit).
+	Ancestry AncestryChecker
 }
 
 func (r Request) validate() error {
@@ -140,6 +155,8 @@ func (r Request) validate() error {
 		return errors.New("verify: request has no worktree dir")
 	case r.Remit == nil:
 		return errors.New("verify: request has no diff-inside-remit checker")
+	case r.Ancestry == nil:
+		return errors.New("verify: request has no ancestry checker")
 	default:
 		return nil
 	}
@@ -148,22 +165,24 @@ func (r Request) validate() error {
 // Verdict is the verification outcome: the derived event the caller feeds to
 // orchestrator.Next plus the structured record the journal needs.
 type Verdict struct {
-	// Event is orchestrator.EventResultOK only when all three checks pass;
-	// otherwise it is the first failing check's event (gate_red, remit_violation,
-	// or probe_failed).
+	// Event is orchestrator.EventResultOK only when all four checks pass;
+	// otherwise it is the first failing check's event (remit_violation for an
+	// ancestry or a diff failure, gate_red, or probe_failed).
 	Event orchestrator.Event
 
 	// Failed is the check that produced a non-result_ok event, "" on result_ok.
-	// Detail names the specifics for the journal (the failing command and its
-	// exit code, the out-of-remit path, or the probe mismatch).
+	// Detail names the specifics for the journal (the branch and base sharing no
+	// merge base, the failing command and its exit code, the out-of-remit path,
+	// or the probe mismatch).
 	Failed Check
 	Detail string
 
 	// Gates is the per-command gate re-run result for runs.gate_result (AC-25).
 	// It is populated once the gate re-run has started — gate_red and every
 	// verdict after it (a later probe failure, or result_ok) — but stays empty on
-	// remit_violation, since the diff-inside-remit check now runs before the
-	// gates and short-circuits before they start.
+	// an ancestry or a remit_violation failure, since both the ancestry check and
+	// the diff-inside-remit check run before the gates and short-circuit before
+	// they start.
 	//
 	// Gates also carries whatever results were collected when Verify returns a
 	// non-nil operational error (AC-25): non-empty when the error surfaces after
@@ -192,14 +211,15 @@ func New(probe PRProbe) *Verifier {
 	return &Verifier{probe: probe}
 }
 
-// Verify runs the three ground-truth checks in order and returns the derived
+// Verify runs the four ground-truth checks in order and returns the derived
 // event. A non-nil error is an operational failure (a gate that could not be
-// launched, a diff or probe transport error) distinct from a failed check, which
-// is reported as a Verdict with the matching event. Order is diff-inside-remit,
-// then gate re-run, then probe, short-circuiting on the first failure; all three
-// must pass to return EventResultOK. The diff runs first, on the worktree exactly
+// launched, an ancestry, diff, or probe transport error) distinct from a failed
+// check, which is reported as a Verdict with the matching event. Order is
+// ancestry, then diff-inside-remit, then gate re-run, then probe, short-
+// circuiting on the first failure; all four must pass to return EventResultOK.
+// Ancestry and the diff both run before the gate re-run, on the worktree exactly
 // as the agent left it, so gate side effects (e.g., a test run's __pycache__)
-// exist only after the diff has already been read and can never register as an
+// exist only after both have already been read and can never register as an
 // out-of-remit escape.
 //
 // On an operational error, the returned Verdict is not the zero value: it
@@ -219,6 +239,22 @@ func (v *Verifier) Verify(ctx context.Context, req Request) (Verdict, error) {
 	}
 	if id := v.probe.Identity(); id == req.Task.AssignedTo {
 		return Verdict{}, fmt.Errorf("verify: probe identity %q equals the Dev agent user; writer must differ from scorer (RFC-0001 §4.1, §4.7)", id)
+	}
+
+	// Ancestry runs before the diff: an orphan or unrelated-history HEAD makes the
+	// diff-inside-remit comparison meaningless, and a concurrent-provision defect
+	// can produce exactly that while the diff
+	// and the gate re-run, both content-only checks, miss it entirely.
+	if err := req.Ancestry.SharesMergeBase(ctx); err != nil {
+		var av *workspace.AncestryViolationError
+		if errors.As(err, &av) {
+			return Verdict{
+				Event:  orchestrator.EventRemitViolation,
+				Failed: CheckAncestry,
+				Detail: fmt.Sprintf("branch %q shares no merge base with base branch %q", av.Branch, av.Base),
+			}, nil
+		}
+		return Verdict{}, fmt.Errorf("verify: ancestry check: %w", err)
 	}
 
 	if err := req.Remit.DiffInsideRemit(ctx); err != nil {

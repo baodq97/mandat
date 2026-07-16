@@ -110,6 +110,37 @@ func TestDiffInsideRemit_ExcludesControlDir(t *testing.T) {
 	}
 }
 
+func TestSharesMergeBase_FreshWorktreePasses(t *testing.T) {
+	t.Parallel()
+
+	ws := provisionForTest(t)
+	// A freshly provisioned worktree's HEAD is the base ref itself, the ordinary
+	// case a concurrent-provision defect must not falsely flag.
+	if err := ws.SharesMergeBase(context.Background()); err != nil {
+		t.Fatalf("SharesMergeBase() for a freshly provisioned worktree = %v, want nil", err)
+	}
+}
+
+func TestSharesMergeBase_OrphanHeadFailsTyped(t *testing.T) {
+	t.Parallel()
+
+	ws := provisionForTest(t)
+	// A concurrent-provision defect can leave the worktree on a parentless root
+	// commit carrying the whole tree; --orphan + commit builds that here directly.
+	git(t, ws.Dir, "checkout", "--orphan", "orphan-root")
+	git(t, ws.Dir, "add", "-A")
+	git(t, ws.Dir, "commit", "-m", "orphan root commit")
+
+	err := ws.SharesMergeBase(context.Background())
+	var ae *AncestryViolationError
+	if !errors.As(err, &ae) {
+		t.Fatalf("SharesMergeBase() = %v, want *AncestryViolationError", err)
+	}
+	if ae.Base != "main" {
+		t.Errorf("AncestryViolationError.Base = %q, want %q", ae.Base, "main")
+	}
+}
+
 func TestProvision_SetupFailureHasNoFallback(t *testing.T) {
 	t.Parallel()
 

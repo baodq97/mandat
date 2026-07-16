@@ -13,6 +13,7 @@ package workspace
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -108,6 +109,21 @@ type RemitViolationError struct {
 
 func (e *RemitViolationError) Error() string {
 	return fmt.Sprintf("workspace: change to %q is outside the remit", e.Path)
+}
+
+// AncestryViolationError names the branch and base branch a run worktree's HEAD
+// shares no merge base with — an orphan or unrelated-history branch, the shape a
+// concurrent-provision defect can produce (an orphan root commit that
+// diff-inside-remit and the gate re-run both miss, since neither checks lineage,
+// only the worktree's own content). The orchestrator maps it to the
+// remit_violation event, the closest existing ground for "never result_ok."
+type AncestryViolationError struct {
+	Branch string
+	Base   string
+}
+
+func (e *AncestryViolationError) Error() string {
+	return fmt.Sprintf("workspace: branch %q shares no merge base with base branch %q", e.Branch, e.Base)
 }
 
 // mirrorLocksMu guards mirrorLocks, the registry of per-mirror in-process
@@ -239,6 +255,32 @@ func (w *Workspace) DiffInsideRemit(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// SharesMergeBase reports a *AncestryViolationError when the run worktree HEAD
+// shares no merge base with the base ref captured at Provision time — an orphan
+// or unrelated-history branch — or nil when a merge base exists. This is a
+// distinct ground from DiffInsideRemit: an orphan root commit can carry the
+// worktree's full content, so a content-only check (the diff, the gate re-run)
+// never sees the broken lineage; only asking git for a common ancestor does.
+func (w *Workspace) SharesMergeBase(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, "git", "merge-base", w.baseRef, "HEAD")
+	cmd.Dir = w.Dir
+	cmd.Env = gitEnv()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		return nil
+	}
+	// `git merge-base` exits 1 specifically for "no common ancestor found"; any
+	// other non-zero exit (e.g. an unresolvable ref) is a real operational error,
+	// not the ancestry check failing.
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && ee.ExitCode() == 1 {
+		return &AncestryViolationError{Branch: w.Branch, Base: w.remit.BaseBranch}
+	}
+	return fmt.Errorf("git merge-base %s HEAD: %w (%s)", w.baseRef, err, strings.TrimSpace(stderr.String()))
 }
 
 // changedPaths is the union of tracked changes against the base commit and new
