@@ -65,3 +65,12 @@ Format: `date | what escaped | where it should have been caught | lesson | encod
   appears (OID vs UPN), audit every comparison the two field kinds feed before
   the next one fails silently | regression tests lock reviewerIdentity to
   AgentUserName (v0.3.0)
+- 2026-07-16 | The lead committed a doc change onto whatever branch a
+  concurrently-running verification agent had checked out in the SHARED
+  working tree; the stray commit rode an agent branch and the verifier's
+  first gate run raced a mutating ref | the dispatch step - verification
+  agents that checkout branches and the lead's own git ops cannot share one
+  checkout | any agent that switches branches gets its own git worktree
+  (mirroring the product's own per-task worktree invariant), and the lead
+  serializes own-tree git ops while such agents run | this entry; verifier
+  briefs now recommend worktree isolation
