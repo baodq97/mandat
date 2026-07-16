@@ -103,3 +103,16 @@ Format: `date | what escaped | where it should have been caught | lesson | encod
   contract, do not re-run bigger - split or escalate the model tier; salvage
   the paid partial diff as reviewable draft input | this entry; WI 28 record
   carries the timeline
+- 2026-07-16 | The first live pool=2 run hit the mirror config.lock race the
+  red-team predicted (F2) one layer deeper than anyone scoped: the runner's
+  post-provision `git config` writes (credential helper, author) run in a
+  LINKED worktree, and linked worktrees write the SHARED repo config - so one
+  task's credential setup raced the sibling's mirror heal. The concurrency
+  tests passed on timing luck: config.lock is held for microseconds and -race
+  only sees memory races, not file locks | the batch-1 lock-scope review -
+  "whole per-repo touch" missed writes that LOOK worktree-local but land on
+  the shared file | enumerate shared-file writers by FILE TARGET, not by call
+  site: any `git config` without --worktree in a linked worktree is a shared
+  write; scope all per-task config to --worktree (the extension batch 1
+  enabled exists for exactly this) | runner gitConfig fix (this arc); this
+  entry
