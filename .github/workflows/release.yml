@@ -1,0 +1,105 @@
+# Release pipeline: the only way a static mandat binary reaches a customer VM
+# (design spec §4.10 — "install time is one download"). Tag push is the trigger
+# so a release always traces to a git ref; workflow_dispatch exists only to
+# re-run a build for a tag that already exists (e.g. a matrix job flaked).
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to (re)build and publish, e.g. v0.1.0'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # One release run per tag: a re-dispatch for the same tag replaces the
+  # in-flight one instead of racing it for the same GitHub Release.
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (linux/${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: echo "tag=${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7.0.0
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - uses: actions/setup-go@v6.5.0
+        with:
+          go-version-file: go.mod
+          # cache: true is the default (module + build cache keyed on go.mod)
+
+      # Same invocation as `make build`'s second step, minus the git-describe
+      # VERSION shell-out: a tag push already names the exact version, so
+      # stamping the resolved tag is more precise than re-deriving it.
+      - name: Build mandat-linux-${{ matrix.arch }}
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          go build -trimpath \
+            -ldflags "-s -w -X github.com/baodq97/mandat/internal/buildinfo.version=${{ steps.tag.outputs.tag }}" \
+            -o mandat-linux-${{ matrix.arch }} \
+            ./cmd/mandat
+
+      # sha256sum's own output format (`<hash>  <filename>`) is also the format
+      # `sha256sum -c` expects, so install.sh can verify without reformatting.
+      - name: Checksum
+        run: sha256sum mandat-linux-${{ matrix.arch }} > mandat-linux-${{ matrix.arch }}.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mandat-linux-${{ matrix.arch }}
+          path: |
+            mandat-linux-${{ matrix.arch }}
+            mandat-linux-${{ matrix.arch }}.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # The only elevated permission in this pipeline, scoped to the one job
+      # that needs it; every other job stays read-only (ADR-0001 keyless gate).
+      contents: write
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: echo "tag=${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release ${{ steps.tag.outputs.tag }}
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*
