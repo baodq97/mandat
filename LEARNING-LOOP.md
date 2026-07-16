@@ -116,3 +116,14 @@ Format: `date | what escaped | where it should have been caught | lesson | encod
   write; scope all per-task config to --worktree (the extension batch 1
   enabled exists for exactly this) | runner gitConfig fix (this arc); this
   entry
+- 2026-07-16 | Under live pool=2 one task's worktree materialized with an
+  unborn HEAD and the agent's commit became an orphan root commit (complete
+  tree, no parent) - and NOTHING downstream noticed: gates ran green on the
+  full tree, the PR opened, the probe confirmed existence+creator, the task
+  landed in-review | two layers - the provision path reads symbolic ref state
+  outside the mirror lock while a sibling's fetch rewrites it, and the
+  verification plane never asserts the PR's ancestry (merge-base with the
+  base branch) | resolve the base SHA under the lock and pass SHAs, not
+  symbolic HEAD, to worktree ops; add an ancestry check to verification
+  (a PR whose branch shares no merge base with base is never result_ok) |
+  fix in flight (CI-flake investigation); ancestry check seeded as backlog
