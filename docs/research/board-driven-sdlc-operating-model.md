@@ -32,7 +32,7 @@ to resolve:
 |---|---|---|
 | Work-item state (`queued → in-progress → in-review → needs-human → done`), assignment, priority, backlog rank | **Board** (the human act is the gate/grant) | board → mandat (work-item lifecycle, spec §4.4) |
 | Governed-doc status (`draft → approved/accepted/done`) | **Repo accept commit** (govkit-gated) | board drag is the ratification signal; the human-authorized accept commit is the authoritative advance. mandat never self-flips governed-doc status (CLAUDE.md) |
-| Acceptance specification | **Repo doc** (authored, red-teamed) | doc → scoped card projection at breakdown. The planner authors a read-only, slice-scoped projection of the doc's AC onto the card; the adapter lifts that card AC into the `TaskContract` (`poll.go` ~L122) as the runtime dispatch contract, a projection, not a competing source |
+| Acceptance specification | **Repo doc** (authored, red-teamed) | doc → read-only card digest at breakdown. The planner authors a slice-scoped digest onto the card that cites the doc AC-ids it derives from (write-time provenance); the adapter lifts that card digest into the `TaskContract` as the runtime dispatch contract, a projection, not a competing source. Drift is prevented at authoring, not detected after (Probe) |
 | Doc body, design detail, research, decision rationale | **Repo** (where the agent works) | repo → board digest |
 | Operational evidence (PR link, verify verdict, cost, run journal) | **Journal / mandat** | mandat → board comment |
 
@@ -41,27 +41,36 @@ Two state machines hide in the State row; keep them separate. The board work-ite
 signals ratification, and the human-authorized accept commit that govkit gates is the
 authoritative advance (mandat never self-flips governed-doc status).
 
-The card AC the adapter lifts into the `TaskContract` is the runtime dispatch contract for one
-slice, a scoped projection of the doc's authored spec, not the spec itself. Formalizing the
-matrix plus an **AC-containment check** closes the drift class at the two events where it can
-appear: at slice-card breakdown and on a source-doc change, verify the card's scoped AC still
-falls within the doc's authored AC, and on escape surface a sync proposal or hold. Not a
-per-poll hash; see Probe.
+The card digest the adapter lifts into the `TaskContract` is the runtime dispatch contract for one
+slice, a scoped projection of the doc's authored spec, not the spec itself. AC is **repo-canonical**:
+the authored `- [ ] AC-x` in `docs/issues/US-xxxx.md` is the source of truth, and the planner authors
+the card digest **from** the doc at breakdown, citing the doc AC-ids it derives from (write-time
+provenance; the #36 card already cites "US-0013 AC-13.3(c) and AC-13.9"). There is no automated
+card-vs-doc comparison at any time: not per poll, not at breakdown, not on doc change. Correctness is
+an authoring discipline, not a runtime check; see Probe.
 
-## Probe — the per-poll-hash premise, falsified (2026-07-16)
+## Probe — AC-containment check NOT VIABLE (`docs/research/ac-ownership-probe.md`, 2026-07-16)
 
-An earlier draft made the card canonical for the active slice's AC and metered drift with a
-per-poll hash of card AC against doc AC. A live probe killed that premise. Fetching work item
-#36's `Microsoft.VSTS.Common.AcceptanceCriteria` returned rich-text HTML (`<ol><li><code>…`);
-US-0013's doc AC is Markdown checkboxes (`- [ ] AC-13.x`). They differ in FORMAT and, more to
-the point, in CONTENT: the card carries a scoped restatement of one dispatched slice, the doc
-carries the full authored specification. They are not two copies of one artifact, so a raw hash
-false-positives every cycle and trains operators to mute the signal. Two more facts sink the
-per-poll design: there is no doc-side Markdown AC reader in the tree, and `serve.go`'s
-`dispatchCycle` skips any already-dispatched task (a `LoadTask` hit `continue`s the poll loop),
-so it never re-reads a dispatched card to compare. The premise is wrong and unbuilt on both
-sides. The model moved to repo-canonical AC plus a containment check at the two events where an
-escape can appear (breakdown, source-doc change).
+Two premises died in sequence. First, an earlier draft made the card canonical for the active
+slice's AC and metered drift with a per-poll hash of card AC against doc AC; that premise was
+already unbuilt (no doc-side Markdown AC reader in the tree, and `serve.go`'s `dispatchCycle`
+`continue`s past any already-dispatched task, so it never re-reads a card to compare). The model
+then moved to repo-canonical AC plus an AC-containment check at breakdown and on source-doc change.
+
+A live probe (`docs/research/ac-ownership-probe.md`) killed that containment check too. Verdict:
+**NOT VIABLE.** On the one real card↔doc pair (work item #36 against US-0013's 14 authored ACs),
+no deterministic normalizer separates "contained" from "not contained"; the residual is
+**sign-inverted**. A genuinely-contained clause (item 5, a faithful restatement of AC-13.4) scored
+50% token-set containment, below a genuinely-uncontained clause (item 6, a slice Definition-of-Done
+that no authored AC states) at 55%. Because 55% > 50%, no monotone threshold passes item 5 without
+also passing item 6, so the metric is anti-correlated with truth in the decision region. The relation
+itself is also false by design: a scoped card legitimately **adds** material (a `make check` gate, a
+per-slice test list) and narrows scope, so "contained in" would flag a correct card addition as a
+violation. "Contained in" is both undecidable deterministically and the wrong relation.
+
+The model is now repo-canonical AC plus **write-time provenance**: the planner authors a read-only
+card digest from the doc and cites the source AC-ids (the #36 card already cites "US-0013 AC-13.3(c)
+and AC-13.9"). Drift is prevented at authoring, not detected after by any comparison engine.
 
 ## Principle 2 — work stations map 1:1 to the governance chain
 
@@ -125,10 +134,11 @@ gate topology; the agent runs work through it. The inherited process is maintain
   like code review. Cost is real but one-time-ish.
 - Rung 1 (conventions) is live now and unblocks board-driven work today; rung 2 (custom
   states) is the milestone that makes the board the sole surface.
-- Risk to weigh in the PRD: the field-ownership matrix depends on the AC-containment check
-  running at breakdown and on source-doc change; without it, a card can restate a slice's AC
-  outside the doc's authored spec and the divergence is silent. The check is a required AC, not
-  a nice-to-have.
+- The field-ownership matrix depends on AC being repo-canonical and the planner authoring a
+  faithful card digest from the doc at breakdown, citing the source AC-ids (write-time provenance).
+  There is no runtime card-vs-doc check; the probe found the AC-containment mechanism NOT VIABLE.
+  The discipline is authoring correctness, audited by whether each active-slice card cites its
+  source AC-ids.
 
 ## Sources (verified this session)
 
@@ -136,6 +146,8 @@ gate topology; the agent runs work through it. The inherited process is maintain
   patterns carry over to board/repo ownership).
 - `docs/research/entra-agent-id-provisioning-surface.md` (assignment-as-grant, identity
   registry the planner station consumes).
+- `docs/research/ac-ownership-probe.md` (2026-07-16, verdict NOT VIABLE): killed the
+  AC-containment check; establishes AC as repo-canonical with a write-time-provenance card digest.
 - Azure DevOps process migration + permission model, MS Learn (verified 2026-07-16):
   change-process-basic-to-agile; the PCA `Manage system project properties` gate on
   `System.ProcessTemplateType`.
