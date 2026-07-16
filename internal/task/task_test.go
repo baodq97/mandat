@@ -98,8 +98,8 @@ func TestParse_RejectsInvalid(t *testing.T) {
 		{name: "missing remit.base_branch", mutate: func(tc *TaskContract) { tc.Remit.BaseBranch = "" }, wantField: "remit.base_branch"},
 		{name: "empty remit.paths", mutate: func(tc *TaskContract) { tc.Remit.Paths = nil }, wantField: "remit.paths"},
 		{name: "empty remit.paths entry", mutate: func(tc *TaskContract) { tc.Remit.Paths = []string{""} }, wantField: "remit.paths[0]"},
-			{name: "absolute remit.paths entry", mutate: func(tc *TaskContract) { tc.Remit.Paths = []string{"/etc/passwd"} }, wantField: "remit.paths[0]"},
-			{name: "parent-traversal remit.paths entry", mutate: func(tc *TaskContract) { tc.Remit.Paths = []string{"internal/../../etc/passwd"} }, wantField: "remit.paths[0]"},
+		{name: "absolute remit.paths entry", mutate: func(tc *TaskContract) { tc.Remit.Paths = []string{"/etc/passwd"} }, wantField: "remit.paths[0]"},
+		{name: "parent-traversal remit.paths entry", mutate: func(tc *TaskContract) { tc.Remit.Paths = []string{"internal/../../etc/passwd"} }, wantField: "remit.paths[0]"},
 		{name: "missing assigned_to", mutate: func(tc *TaskContract) { tc.AssignedTo = "" }, wantField: "assigned_to"},
 		{name: "wrong schema_version", mutate: func(tc *TaskContract) { tc.SchemaVersion = 2 }, wantField: "schema_version"},
 	}
