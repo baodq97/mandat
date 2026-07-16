@@ -139,6 +139,15 @@ func Provision(ctx context.Context, cfg Config) (*Workspace, error) {
 		return nil, &SetupError{Op: "worktree", Err: err}
 	}
 
+	// The mirror is bare (see ensureMirror); git < 2.35 leaks that core.bare=true
+	// into this linked worktree and fails the work-tree ops below. The per-worktree
+	// override — honored because ensureMirror enabled extensions.worktreeConfig —
+	// flips core.bare=false for this worktree alone, leaving the mirror bare so its
+	// refresh fetch never hits the non-bare refusal.
+	if _, err := runGit(ctx, wtDir, "config", "--worktree", "core.bare", "false"); err != nil {
+		return nil, &SetupError{Op: "worktree", Err: err}
+	}
+
 	// `sparse-checkout set` writes the pattern file and skip-worktree bits;
 	// `read-tree -mu HEAD` then materializes exactly the in-pattern subset from
 	// the empty --no-checkout working tree, honoring those skip-worktree bits so
@@ -231,11 +240,9 @@ func pathInRemit(changed string, patterns []string) bool {
 // cross-task lock yet. credHelper is passed through gitCredArgs to the clone and
 // the fetch, the two network ops that need to authenticate to the origin.
 func ensureMirror(ctx context.Context, repoURL, mirrorDir, credHelper string) error {
-	if _, err := os.Stat(mirrorDir); err == nil {
-		if _, err := runGit(ctx, mirrorDir, gitCredArgs(credHelper, "fetch", "--prune")...); err != nil {
-			return &SetupError{Op: "mirror", Err: err}
-		}
-	} else {
+	existed := true
+	if _, err := os.Stat(mirrorDir); err != nil {
+		existed = false
 		if err := os.MkdirAll(filepath.Dir(mirrorDir), 0o700); err != nil {
 			return &SetupError{Op: "mirror", Err: err}
 		}
@@ -244,12 +251,28 @@ func ensureMirror(ctx context.Context, repoURL, mirrorDir, credHelper string) er
 		}
 	}
 
-	// A --mirror clone sets core.bare=true, which git < 2.35 leaks into linked
-	// worktrees so every work-tree op there fails ("must be run in a work tree").
-	// Force it false so worktrees are non-bare on every git version; the mirror
-	// itself only ever fetches and hosts worktrees, never a work-tree op.
-	if _, err := runGit(ctx, mirrorDir, "config", "core.bare", "false"); err != nil {
+	// Invariant pair. The mirror MUST stay bare: with its +refs/*:refs/* mirror
+	// refspec, `git fetch` into a non-bare repo refuses to update the branch HEAD
+	// points at ("Refusing to fetch into current branch ... of non-bare
+	// repository"), so every refresh after the first fails. Yet git < 2.35 leaks
+	// the shared core.bare into linked worktrees, where core.bare=true fails every
+	// work-tree op ("must be run in a work tree"). extensions.worktreeConfig
+	// reconciles them: the mirror stays bare here while each worktree overrides
+	// core.bare=false in its own per-worktree config at provision time. The heal
+	// runs on every ensureMirror — not just after clone — because v0.1.1 shipped
+	// core.bare=false on the mirror and the refresh below fetches into those
+	// already-poisoned mirrors, so it must precede the fetch to unbreak it.
+	if _, err := runGit(ctx, mirrorDir, "config", "core.bare", "true"); err != nil {
 		return &SetupError{Op: "mirror", Err: err}
+	}
+	if _, err := runGit(ctx, mirrorDir, "config", "extensions.worktreeConfig", "true"); err != nil {
+		return &SetupError{Op: "mirror", Err: err}
+	}
+
+	if existed {
+		if _, err := runGit(ctx, mirrorDir, gitCredArgs(credHelper, "fetch", "--prune")...); err != nil {
+			return &SetupError{Op: "mirror", Err: err}
+		}
 	}
 	return nil
 }

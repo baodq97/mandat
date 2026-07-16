@@ -181,13 +181,14 @@ func TestProvision_CredentialHelperOverrideHarmlessAgainstLocalOrigin(t *testing
 	assertExists(t, filepath.Join(ws.Dir, "cmd/mandat/main.go"))
 }
 
-func TestProvision_MirrorForcedNonBare(t *testing.T) {
+func TestProvision_MirrorStaysBareWorktreeOverrides(t *testing.T) {
 	t.Parallel()
 
-	// A --mirror clone sets core.bare=true; on git < 2.35 (the customer VM's
-	// 2.34.1) that leaks into linked worktrees and every work-tree op there
-	// fails. ensureMirror must force it back to false so the fix holds
-	// regardless of the git version running the test.
+	// The invariant pair (ensureMirror): the mirror MUST stay bare so its
+	// +refs/*:refs/* fetch never hits the non-bare refusal, while the linked
+	// worktree MUST see core.bare=false so work-tree ops run on git < 2.35 (the
+	// customer VM's 2.34.1), which leaks the shared core.bare into worktrees.
+	// extensions.worktreeConfig + a per-worktree override reconciles the two.
 	mirrorDir := filepath.Join(t.TempDir(), "mirror.git")
 	cfg := Config{
 		RepoURL:   newBareOrigin(t),
@@ -196,17 +197,92 @@ func TestProvision_MirrorForcedNonBare(t *testing.T) {
 		TaskID:    "ado-baodo0220-44",
 		Remit:     task.Remit{Repo: "mandat", BaseBranch: "main", Paths: []string{"cmd/mandat/", "internal/buildinfo/"}},
 	}
-	if _, err := Provision(context.Background(), cfg); err != nil {
+	ws, err := Provision(context.Background(), cfg)
+	if err != nil {
 		t.Fatalf("Provision() error = %v, want nil", err)
 	}
 
-	out, err := exec.Command("git", "-C", mirrorDir, "config", "--get", "core.bare").CombinedOutput()
+	if got := gitConfig(t, mirrorDir, "core.bare"); got != "true" {
+		t.Errorf("mirror core.bare = %q, want %q", got, "true")
+	}
+	// The per-worktree override wins inside the worktree.
+	if got := gitConfig(t, ws.Dir, "core.bare"); got != "false" {
+		t.Errorf("worktree core.bare = %q, want %q", got, "false")
+	}
+	// A work-tree op runs in the worktree despite the bare mirror.
+	if out, err := exec.Command("git", "-C", ws.Dir, "status", "--porcelain").CombinedOutput(); err != nil {
+		t.Fatalf("git -C %s status: %v\n%s", ws.Dir, err, out)
+	}
+}
+
+func TestProvision_HealsV011PoisonedMirror(t *testing.T) {
+	t.Parallel()
+
+	// Regression for finding #3: v0.1.1 set core.bare=false on the mirror to dodge
+	// the git < 2.35 worktree leak, but a non-bare mirror refuses the next
+	// +refs/*:refs/* fetch that updates the branch HEAD points at, breaking every
+	// provision after the first. ensureMirror must heal the mirror back to bare on
+	// the fetch path — before the fetch — so a second provision succeeds.
+	origin := newBareOrigin(t)
+	mirrorDir := filepath.Join(t.TempDir(), "mirror.git")
+	base := Config{
+		RepoURL:   origin,
+		MirrorDir: mirrorDir,
+		TasksRoot: t.TempDir(),
+		Remit:     task.Remit{Repo: "mandat", BaseBranch: "main", Paths: []string{"cmd/mandat/", "internal/buildinfo/"}},
+	}
+
+	first := base
+	first.TaskID = "ado-baodo0220-45"
+	if _, err := Provision(context.Background(), first); err != nil {
+		t.Fatalf("first Provision() error = %v, want nil", err)
+	}
+
+	// Reproduce the v0.1.1 poisoning: core.bare=false on the mirror, plus a new
+	// commit on the default branch so the next fetch must update the branch the
+	// mirror's HEAD points at — the exact update a non-bare mirror refuses.
+	git(t, mirrorDir, "config", "core.bare", "false")
+	pushNewCommitToDefaultBranch(t, origin)
+
+	second := base
+	second.TaskID = "ado-baodo0220-46"
+	ws, err := Provision(context.Background(), second)
 	if err != nil {
-		t.Fatalf("git config --get core.bare: %v\n%s", err, out)
+		t.Fatalf("second Provision() against a v0.1.1-poisoned mirror = %v, want nil (heal expected)", err)
 	}
-	if got := strings.TrimSpace(string(out)); got != "false" {
-		t.Errorf("core.bare = %q, want %q", got, "false")
+
+	if got := gitConfig(t, mirrorDir, "core.bare"); got != "true" {
+		t.Errorf("healed mirror core.bare = %q, want %q", got, "true")
 	}
+	// The full provision completed: the remit tree materialized and a work-tree op
+	// runs in the new worktree.
+	assertExists(t, filepath.Join(ws.Dir, "cmd/mandat/main.go"))
+	if out, err := exec.Command("git", "-C", ws.Dir, "status", "--porcelain").CombinedOutput(); err != nil {
+		t.Fatalf("git -C %s status: %v\n%s", ws.Dir, err, out)
+	}
+}
+
+// pushNewCommitToDefaultBranch clones origin into a scratch checkout, commits a
+// change on main, and pushes it back, advancing the branch the mirror's HEAD
+// tracks so the next mirror fetch must update that ref.
+func pushNewCommitToDefaultBranch(t *testing.T, origin string) {
+	t.Helper()
+	work := t.TempDir()
+	git(t, "", "clone", origin, work)
+	appendFile(t, filepath.Join(work, "cmd/mandat/main.go"), "\n// second commit\n")
+	git(t, work, "add", "-A")
+	git(t, work, "commit", "-m", "second commit")
+	git(t, work, "push", "origin", "HEAD:main")
+}
+
+// gitConfig reads a single git config value from dir, failing the test on error.
+func gitConfig(t *testing.T, dir, key string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", dir, "config", "--get", key).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git -C %s config --get %s: %v\n%s", dir, key, err, out)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func git(t *testing.T, dir string, args ...string) {
