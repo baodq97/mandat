@@ -608,6 +608,16 @@ func TestDispatchCycle_PoolBoundsConcurrency(t *testing.T) {
 		}
 		if got.State != task.StateInReview {
 			t.Errorf("task %s state = %q, want %q", tc.ID, got.State, task.StateInReview)
+			// A task that settled off the happy path went there for a journaled
+			// reason (a setup_failed detail carries the git error text); dump the
+			// hold event so a flake surfaces its mechanism instead of just its state.
+			if events, evErr := deps.Store.Events(ctx, tc.ID); evErr == nil {
+				for i := range events {
+					if events[i].ToState == string(task.StateNeedsHuman) {
+						t.Logf("task %s held: act=%s from=%s detail=%s", tc.ID, events[i].Act, events[i].FromState, events[i].Detail)
+					}
+				}
+			}
 		}
 	}
 	if got := len(spawner.recordedEnvs()); got != 3 {
@@ -716,6 +726,37 @@ func TestDispatchCycle_PoolOneIsSequential(t *testing.T) {
 	}
 	if peak := spawner.peakConcurrency(); peak != 1 {
 		t.Errorf("peak concurrency = %d, want 1 (pool_size 1 must serialize dispatch)", peak)
+	}
+}
+
+// TestRunDispatchLoop_Once is ado-baodo0220-31: --once must run exactly one
+// dispatch cycle through the same dispatchCycle the daemon loop calls (same
+// drain-per-cycle semantics) and return without ever creating a ticker. An
+// interval far longer than the test timeout proves the ticker path is never
+// entered — if runDispatchLoop looped, this call would hang.
+func TestRunDispatchLoop_Once(t *testing.T) {
+	deps, _, tc := newSkeleton(t, "completed")
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	code := runDispatchLoop(ctx, deps, &stdout, &stderr, true, time.Hour)
+
+	if code != 0 {
+		t.Errorf("runDispatchLoop(once=true) = %d, want 0", code)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want empty", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), tc.ID) || !strings.Contains(stdout.String(), string(orchestrator.StateInReview)) {
+		t.Errorf("stdout = %q, want it to report task %s reached %s", stdout.String(), tc.ID, orchestrator.StateInReview)
+	}
+
+	got, err := deps.Store.LoadTask(ctx, tc.ID)
+	if err != nil {
+		t.Fatalf("LoadTask(%s) error = %v", tc.ID, err)
+	}
+	if got.State != task.StateInReview {
+		t.Errorf("task %s state = %q, want %q", tc.ID, got.State, task.StateInReview)
 	}
 }
 

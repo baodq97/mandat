@@ -24,6 +24,11 @@ import (
 // TaskContract carries the same id so result.Parse's task_id check passes.
 const fakeTaskID = "ado-baodo0220-42"
 
+// verboseFillerCount is how many filler stream-json lines the "verbose_completed"
+// scenario emits — comfortably past maxStreamTailEvents, so the tail-persist test
+// can prove the cap trims the head of the stream, not the tail.
+const verboseFillerCount = 250
+
 // The ResultContract bodies the fake claude writes, one per scenario. They are
 // package consts so both the fake (which writes them from the re-exec'd child)
 // and the assertions (which compare the journaled raw bytes) share one source.
@@ -92,6 +97,12 @@ func TestHelperProcess(t *testing.T) {
 	case "crash_no_file":
 		fmt.Fprintln(os.Stderr, "fatal: agent crashed")
 		os.Exit(1)
+	case "verbose_completed":
+		// Filler lines AFTER the standard init+result pair emitted above, so the
+		// true last line of the whole stream is a filler event, not "result" —
+		// the tail-persist test asserts against that known last event.
+		emitFillerStream(verboseFillerCount)
+		writeResultFile(completedResult)
 	}
 	os.Exit(0)
 }
@@ -99,6 +110,14 @@ func TestHelperProcess(t *testing.T) {
 func emitSuccessStream(session string) {
 	fmt.Fprintf(os.Stdout, `{"type":"system","subtype":"init","session_id":%q,"model":"claude-sonnet","tools":[]}`+"\n", session)
 	fmt.Fprintf(os.Stdout, `{"type":"result","subtype":"success","is_error":false,"duration_ms":1234,"num_turns":3,"total_cost_usd":0.4212,"usage":{"input_tokens":1200,"output_tokens":340,"cache_read_input_tokens":800},"session_id":%q}`+"\n", session)
+}
+
+// emitFillerStream writes n small stream-json lines, each carrying its own index
+// as "seq" so a test can tell which events survived a tail trim.
+func emitFillerStream(n int) {
+	for i := range n {
+		fmt.Fprintf(os.Stdout, `{"type":"assistant","seq":%d,"message":{"content":"filler event %d"}}`+"\n", i, i)
+	}
 }
 
 func writeResultFile(content string) {
@@ -567,6 +586,82 @@ func TestSupervisor_Run_ChildCrashNoFile(t *testing.T) {
 	}
 	if run.ExitCode != 1 {
 		t.Errorf("runs.exit_code = %d, want 1", run.ExitCode)
+	}
+}
+
+// TestSupervisor_Run_PersistsStreamTail is the ado-baodo0220-29 fix: a run that
+// dies without a ResultContract must still leave evidence of why (live escape: WI
+// 28 died twice with zero post-mortem data). The fake claude emits far more than
+// maxStreamTailEvents lines; the persisted tail file must be capped at the last
+// maxStreamTailEvents and must hold the STREAM'S TAIL — the highest-seq filler
+// events — not its head, proving the cap trims the front, not the back.
+func TestSupervisor_Run_PersistsStreamTail(t *testing.T) {
+	ctx := context.Background()
+	store := openStore(t)
+	req := newRequest(t, config.ModelSonnet)
+	spawner := &fakeClaudeSpawner{scenario: "verbose_completed"}
+	sup := New(store, spawner, Config{ClaudePath: os.Args[0], MaxBudgetUSD: 5})
+
+	out, err := sup.Run(ctx, req)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if out.Event != orchestrator.EventResultOK {
+		t.Fatalf("event = %q, want %q", out.Event, orchestrator.EventResultOK)
+	}
+
+	tailPath := filepath.Join(req.Worktree.Dir, filepath.Dir(result.Path), streamTailFile)
+	raw, err := os.ReadFile(tailPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", tailPath, err)
+	}
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	if len(lines) != maxStreamTailEvents {
+		t.Fatalf("tail has %d lines, want the cap %d", len(lines), maxStreamTailEvents)
+	}
+
+	var first, last struct {
+		Seq int `json:"seq"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
+		t.Fatalf("unmarshal first tail line %q: %v", lines[0], err)
+	}
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &last); err != nil {
+		t.Fatalf("unmarshal last tail line %q: %v", lines[len(lines)-1], err)
+	}
+	if first.Seq == 0 {
+		t.Error("tail's first surviving line has seq 0: the cap trimmed the tail instead of the head")
+	}
+	if last.Seq != verboseFillerCount-1 {
+		t.Errorf("tail's last line seq = %d, want the true last event %d", last.Seq, verboseFillerCount-1)
+	}
+}
+
+// TestSupervisor_Run_StreamTailWriteFailureDoesNotFailRun proves the persist step
+// is best-effort: even when the tail write itself fails (here, the target path is
+// occupied by a directory), the run still completes and derives its outcome
+// normally. The ResultContract file contract (US-0006/ADR-0006) is untouched by
+// this failure.
+func TestSupervisor_Run_StreamTailWriteFailureDoesNotFailRun(t *testing.T) {
+	ctx := context.Background()
+	store := openStore(t)
+	req := newRequest(t, config.ModelSonnet)
+
+	controlDir := filepath.Join(req.Worktree.Dir, filepath.Dir(result.Path))
+	tailPath := filepath.Join(controlDir, streamTailFile)
+	if err := os.MkdirAll(tailPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", tailPath, err)
+	}
+
+	spawner := &fakeClaudeSpawner{scenario: "no_file"}
+	sup := New(store, spawner, Config{ClaudePath: os.Args[0], MaxBudgetUSD: 5})
+
+	out, err := sup.Run(ctx, req)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want the run to complete despite the tail write failing", err)
+	}
+	if out.Event != orchestrator.EventResultInvalid {
+		t.Errorf("event = %q, want %q", out.Event, orchestrator.EventResultInvalid)
 	}
 }
 

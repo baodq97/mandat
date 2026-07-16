@@ -33,6 +33,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -256,6 +257,13 @@ func (s *Supervisor) run(ctx context.Context, req Request, sessionID string, res
 	tel := parseTelemetry(stdout.Bytes())
 	tel.SessionMatch = tel.ObservedSessionID == sessionID
 	exitCode := spawnExitCode(spawnErr)
+
+	// Best-effort post-mortem aid (live escape: WI 28 died twice with zero
+	// post-mortem data): a write failure here must never fail a run it is only
+	// trying to explain, so it is logged and dropped, not returned.
+	if err := writeStreamTail(filepath.Dir(resultPath), stdout.Bytes()); err != nil {
+		slog.Warn("runner: persist stream tail failed", "task", req.Task.ID, "run", runID, "error", err)
+	}
 
 	// Outcome from the file, never stdout. The read and validate below are the
 	// only source of the event: a missing file, unreadable file, or schema

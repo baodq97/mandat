@@ -8,3 +8,4 @@
 
 # per-machine gate sensor data (feeds distill locally, never shared state)
 /.govkit/
+.claude/worktrees/
