@@ -719,6 +719,37 @@ func TestDispatchCycle_PoolOneIsSequential(t *testing.T) {
 	}
 }
 
+// TestRunDispatchLoop_Once is ado-baodo0220-31: --once must run exactly one
+// dispatch cycle through the same dispatchCycle the daemon loop calls (same
+// drain-per-cycle semantics) and return without ever creating a ticker. An
+// interval far longer than the test timeout proves the ticker path is never
+// entered — if runDispatchLoop looped, this call would hang.
+func TestRunDispatchLoop_Once(t *testing.T) {
+	deps, _, tc := newSkeleton(t, "completed")
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	code := runDispatchLoop(ctx, deps, &stdout, &stderr, true, time.Hour)
+
+	if code != 0 {
+		t.Errorf("runDispatchLoop(once=true) = %d, want 0", code)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want empty", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), tc.ID) || !strings.Contains(stdout.String(), string(orchestrator.StateInReview)) {
+		t.Errorf("stdout = %q, want it to report task %s reached %s", stdout.String(), tc.ID, orchestrator.StateInReview)
+	}
+
+	got, err := deps.Store.LoadTask(ctx, tc.ID)
+	if err != nil {
+		t.Fatalf("LoadTask(%s) error = %v", tc.ID, err)
+	}
+	if got.State != task.StateInReview {
+		t.Errorf("task %s state = %q, want %q", tc.ID, got.State, task.StateInReview)
+	}
+}
+
 // TestDispatchLimit is US-0012 AC-12.8: the aggregate-budget admission bound. The
 // derive rule (max_usd_in_flight unset) caps concurrency at exactly pool_size; an
 // explicit, tighter ceiling throttles to floor(ceiling / max_usd_per_run) below the
