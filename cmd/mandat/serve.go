@@ -235,6 +235,7 @@ func runTask(ctx context.Context, d serveDeps, tc task.TaskContract) (orchestrat
 		Branch:      ws.Branch,
 		Gates:       d.Gates(tc.Remit.Repo),
 		Remit:       ws,
+		Ancestry:    ws,
 	})
 	if err != nil {
 		// An operational error (e.g. the PR probe's transport failing) is distinct

@@ -61,6 +61,20 @@ func (f *fakeRemit) DiffInsideRemit(_ context.Context) error {
 	return f.err
 }
 
+// fakeAncestry is the §9 ancestry-check double. err nil means HEAD shares a
+// merge base with the base branch; a *workspace.AncestryViolationError means it
+// does not. It counts calls so a test can prove whether (and how often) the
+// ancestry check ran relative to the diff, the gate re-run, and the probe.
+type fakeAncestry struct {
+	err   error
+	calls int
+}
+
+func (f *fakeAncestry) SharesMergeBase(_ context.Context) error {
+	f.calls++
+	return f.err
+}
+
 // orderedRemit is the diff-inside-remit double for TestVerify_DiffRunsBeforeGate.
 // It writes a sentinel file when called, so a gate script run afterward can
 // prove causally — not just by call count — that the diff already ran: the
@@ -109,13 +123,14 @@ func baseTask() *task.TaskContract {
 	}
 }
 
-func request(dir string, gates []string, remit RemitChecker) Request {
+func request(dir string, gates []string, remit RemitChecker, ancestry AncestryChecker) Request {
 	return Request{
 		Task:        baseTask(),
 		WorktreeDir: dir,
 		Branch:      branch,
 		Gates:       gates,
 		Remit:       remit,
+		Ancestry:    ancestry,
 	}
 }
 
@@ -133,7 +148,7 @@ func TestVerify_ResultOK_AllThreeChecksPass(t *testing.T) {
 	remit := &fakeRemit{}
 	probe := &fakeProbe{identity: reviewerUser, info: PRInfo{Exists: true, CreatedBy: devUser, URL: "https://dev.azure.com/baodo0220/mandat/_git/mandat/pullrequest/7"}}
 
-	got, err := New(probe).Verify(context.Background(), request(dir, []string{gate}, remit))
+	got, err := New(probe).Verify(context.Background(), request(dir, []string{gate}, remit, &fakeAncestry{}))
 	if err != nil {
 		t.Fatalf("Verify() error = %v", err)
 	}
@@ -182,7 +197,7 @@ func TestVerify_GateRed(t *testing.T) {
 	remit := &fakeRemit{}
 	probe := &fakeProbe{identity: reviewerUser, info: PRInfo{Exists: true, CreatedBy: devUser}}
 
-	got, err := New(probe).Verify(context.Background(), request(dir, []string{gate}, remit))
+	got, err := New(probe).Verify(context.Background(), request(dir, []string{gate}, remit, &fakeAncestry{}))
 	if err != nil {
 		t.Fatalf("Verify() error = %v", err)
 	}
@@ -220,7 +235,7 @@ func TestVerify_RemitViolation(t *testing.T) {
 	remit := &fakeRemit{err: &workspace.RemitViolationError{Path: "secrets/leak.txt"}}
 	probe := &fakeProbe{identity: reviewerUser, info: PRInfo{Exists: true, CreatedBy: devUser}}
 
-	got, err := New(probe).Verify(context.Background(), request(dir, []string{gate}, remit))
+	got, err := New(probe).Verify(context.Background(), request(dir, []string{gate}, remit, &fakeAncestry{}))
 	if err != nil {
 		t.Fatalf("Verify() error = %v", err)
 	}
@@ -241,6 +256,46 @@ func TestVerify_RemitViolation(t *testing.T) {
 	}
 	if probe.calls != 0 {
 		t.Errorf("probe calls = %d, want 0 (remit violation short-circuits before the gate and the probe)", probe.calls)
+	}
+}
+
+// TestVerify_AncestryViolation drives the ancestry-check failure: an orphan or
+// unrelated-history branch holds the run for a human on the reused
+// remit_violation event (no new orchestrator event) and stops before the diff,
+// the gate re-run, and the probe even start.
+func TestVerify_AncestryViolation(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	gate := gateScript(t, dir, 0)
+	ancestry := &fakeAncestry{err: &workspace.AncestryViolationError{Branch: branch, Base: "main"}}
+	remit := &fakeRemit{}
+	probe := &fakeProbe{identity: reviewerUser, info: PRInfo{Exists: true, CreatedBy: devUser}}
+
+	got, err := New(probe).Verify(context.Background(), request(dir, []string{gate}, remit, ancestry))
+	if err != nil {
+		t.Fatalf("Verify() error = %v", err)
+	}
+	if got.Event != orchestrator.EventRemitViolation {
+		t.Errorf("event = %q, want %q", got.Event, orchestrator.EventRemitViolation)
+	}
+	if got.Failed != CheckAncestry {
+		t.Errorf("Failed = %q, want %q", got.Failed, CheckAncestry)
+	}
+	if !strings.Contains(got.Detail, branch) || !strings.Contains(got.Detail, "main") {
+		t.Errorf("Detail = %q, want it to name the branch and the base branch", got.Detail)
+	}
+	if ancestry.calls != 1 {
+		t.Errorf("ancestry calls = %d, want 1", ancestry.calls)
+	}
+	if remit.calls != 0 {
+		t.Errorf("diff-inside-remit calls = %d, want 0 (ancestry short-circuits before the diff)", remit.calls)
+	}
+	if len(got.Gates) != 0 {
+		t.Errorf("Gates = %+v, want empty: the gate re-run never starts once ancestry has already failed", got.Gates)
+	}
+	if probe.calls != 0 {
+		t.Errorf("probe calls = %d, want 0 (ancestry violation short-circuits before the gate and the probe)", probe.calls)
 	}
 }
 
@@ -265,7 +320,7 @@ func TestVerify_DiffRunsBeforeGate(t *testing.T) {
 	remit := &orderedRemit{sentinel: sentinel}
 	probe := &fakeProbe{identity: reviewerUser, info: PRInfo{Exists: true, CreatedBy: devUser}}
 
-	got, err := New(probe).Verify(context.Background(), request(dir, []string{gate}, remit))
+	got, err := New(probe).Verify(context.Background(), request(dir, []string{gate}, remit, &fakeAncestry{}))
 	if err != nil {
 		t.Fatalf("Verify() error = %v", err)
 	}
@@ -299,7 +354,7 @@ func TestVerify_ProbeFailed(t *testing.T) {
 			remit := &fakeRemit{}
 			probe := &fakeProbe{identity: reviewerUser, info: tc.info}
 
-			got, err := New(probe).Verify(context.Background(), request(dir, []string{gate}, remit))
+			got, err := New(probe).Verify(context.Background(), request(dir, []string{gate}, remit, &fakeAncestry{}))
 			if err != nil {
 				t.Fatalf("Verify() error = %v", err)
 			}
@@ -334,7 +389,7 @@ func TestVerify_ProbeTransportErrorAfterGreenGates(t *testing.T) {
 	remit := &fakeRemit{}
 	probe := &fakeProbe{identity: reviewerUser, err: errors.New("transport: connection reset by peer")}
 
-	got, err := New(probe).Verify(context.Background(), request(dir, []string{gate1, gate2}, remit))
+	got, err := New(probe).Verify(context.Background(), request(dir, []string{gate1, gate2}, remit, &fakeAncestry{}))
 	if err == nil {
 		t.Fatal("Verify() error = nil, want the probe's transport error")
 	}
@@ -354,7 +409,7 @@ func TestVerify_DiffCheckTransportError(t *testing.T) {
 	remit := &fakeRemit{err: errors.New("transport: diff-check connection reset")}
 	probe := &fakeProbe{identity: reviewerUser, info: PRInfo{Exists: true, CreatedBy: devUser}}
 
-	got, err := New(probe).Verify(context.Background(), request(dir, []string{gate}, remit))
+	got, err := New(probe).Verify(context.Background(), request(dir, []string{gate}, remit, &fakeAncestry{}))
 	if err == nil {
 		t.Fatal("Verify() error = nil, want the diff-check's transport error")
 	}
@@ -376,7 +431,7 @@ func TestVerify_WriterMustDifferFromScorer(t *testing.T) {
 	// scorer. Everything else is green, so only the identity guard can hold it.
 	probe := &fakeProbe{identity: devUser, info: PRInfo{Exists: true, CreatedBy: devUser}}
 
-	got, err := New(probe).Verify(context.Background(), request(dir, []string{gate}, remit))
+	got, err := New(probe).Verify(context.Background(), request(dir, []string{gate}, remit, &fakeAncestry{}))
 	if err == nil {
 		t.Fatalf("Verify() error = nil, want a writer==scorer refusal; verdict = %+v", got)
 	}
@@ -408,7 +463,7 @@ func TestVerify_IgnoresResultContractSelfReport(t *testing.T) {
 		remit := &fakeRemit{}
 		probe := &fakeProbe{identity: reviewerUser, info: PRInfo{Exists: true, CreatedBy: devUser}}
 
-		got, err := New(probe).Verify(context.Background(), request(dir, []string{gate}, remit))
+		got, err := New(probe).Verify(context.Background(), request(dir, []string{gate}, remit, &fakeAncestry{}))
 		if err != nil {
 			t.Fatalf("Verify() error = %v", err)
 		}
@@ -427,7 +482,7 @@ func TestVerify_IgnoresResultContractSelfReport(t *testing.T) {
 		remit := &fakeRemit{}
 		probe := &fakeProbe{identity: reviewerUser, info: PRInfo{Exists: true, CreatedBy: devUser}}
 
-		got, err := New(probe).Verify(context.Background(), request(dir, []string{gate}, remit))
+		got, err := New(probe).Verify(context.Background(), request(dir, []string{gate}, remit, &fakeAncestry{}))
 		if err != nil {
 			t.Fatalf("Verify() error = %v", err)
 		}
@@ -455,7 +510,7 @@ func TestVerify_MultipleGatesAllRun(t *testing.T) {
 	remit := &fakeRemit{}
 	probe := &fakeProbe{identity: reviewerUser, info: PRInfo{Exists: true, CreatedBy: devUser}}
 
-	got, err := New(probe).Verify(context.Background(), request(dir, []string{pass, fail}, remit))
+	got, err := New(probe).Verify(context.Background(), request(dir, []string{pass, fail}, remit, &fakeAncestry{}))
 	if err != nil {
 		t.Fatalf("Verify() error = %v", err)
 	}
@@ -476,9 +531,10 @@ func TestVerify_RequestValidation(t *testing.T) {
 	t.Parallel()
 
 	cases := map[string]Request{
-		"no_task":     {WorktreeDir: t.TempDir(), Remit: &fakeRemit{}},
-		"no_worktree": {Task: baseTask(), Remit: &fakeRemit{}},
-		"no_remit":    {Task: baseTask(), WorktreeDir: t.TempDir()},
+		"no_task":     {WorktreeDir: t.TempDir(), Remit: &fakeRemit{}, Ancestry: &fakeAncestry{}},
+		"no_worktree": {Task: baseTask(), Remit: &fakeRemit{}, Ancestry: &fakeAncestry{}},
+		"no_remit":    {Task: baseTask(), WorktreeDir: t.TempDir(), Ancestry: &fakeAncestry{}},
+		"no_ancestry": {Task: baseTask(), WorktreeDir: t.TempDir(), Remit: &fakeRemit{}},
 	}
 	for name, req := range cases {
 		t.Run(name, func(t *testing.T) {
