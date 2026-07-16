@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/baodq97/mandat/internal/result"
 	"github.com/baodq97/mandat/internal/task"
@@ -109,6 +110,40 @@ func (e *RemitViolationError) Error() string {
 	return fmt.Sprintf("workspace: change to %q is outside the remit", e.Path)
 }
 
+// mirrorLocksMu guards mirrorLocks, the registry of per-mirror in-process
+// locks. It is only ever held for the map lookup/insert in mirrorLock, never
+// across a git call.
+var mirrorLocksMu sync.Mutex
+
+// mirrorLocks maps a mirror directory to the mutex that serializes every
+// touch of that mirror: ensureMirror's clone-or-fetch and config heal, and the
+// `git worktree add` that links a new worktree into it. `git config` takes an
+// exclusive, non-retrying config.lock, so two concurrent Provision calls
+// against the same warm mirror can otherwise collide on that lock and the
+// loser surfaces as a spurious needs-human SetupError (US-0012 AC-12.2).
+//
+// This lock is in-process only, and that is the correct scope: RFC-0001 (the
+// single-VM concurrent-dispatch amendment) runs exactly one serve daemon per
+// VM, so there is never a second process touching this mirror to race
+// against. Cross-process locking is explicitly out of scope.
+//
+// Different mirror directories get different mutexes, so concurrent
+// Provision calls for different repos never block each other.
+var mirrorLocks = make(map[string]*sync.Mutex)
+
+// mirrorLock returns the mutex serializing touches of mirrorDir, creating one
+// on first use.
+func mirrorLock(mirrorDir string) *sync.Mutex {
+	mirrorLocksMu.Lock()
+	defer mirrorLocksMu.Unlock()
+	mu, ok := mirrorLocks[mirrorDir]
+	if !ok {
+		mu = &sync.Mutex{}
+		mirrorLocks[mirrorDir] = mu
+	}
+	return mu
+}
+
 // Provision creates the per-task worktree at <TasksRoot>/<TaskID>: a linked
 // worktree of the mirror, on a fresh task branch off the remit's base branch,
 // with sparse checkout set to exactly the remit paths so no file outside the
@@ -116,27 +151,9 @@ func (e *RemitViolationError) Error() string {
 // failure returns a *SetupError and no Workspace; there is no shared-checkout
 // fallback (spec §4.5, RFC-0001 AC-18).
 func Provision(ctx context.Context, cfg Config) (*Workspace, error) {
-	if err := ensureMirror(ctx, cfg.RepoURL, cfg.MirrorDir, cfg.CredentialHelper); err != nil {
-		return nil, err
-	}
-
-	baseRef, err := runGit(ctx, cfg.MirrorDir, "rev-parse", "--verify", cfg.Remit.BaseBranch)
+	baseRef, wtDir, branch, err := touchMirror(ctx, cfg)
 	if err != nil {
-		return nil, &SetupError{Op: "base-branch", Err: err}
-	}
-	baseRef = strings.TrimSpace(baseRef)
-
-	if err := os.MkdirAll(cfg.TasksRoot, 0o700); err != nil {
-		return nil, &SetupError{Op: "worktree", Err: err}
-	}
-	wtDir := filepath.Join(cfg.TasksRoot, cfg.TaskID)
-	branch := branchPrefix + cfg.TaskID
-
-	// --no-checkout defers materialization until the sparse patterns are set, so
-	// the full tree is never written to disk (the remit must never be exceeded,
-	// even for the moment between checkout and sparse configuration).
-	if _, err := runGit(ctx, cfg.MirrorDir, "worktree", "add", "--no-checkout", "-b", branch, wtDir, baseRef); err != nil {
-		return nil, &SetupError{Op: "worktree", Err: err}
+		return nil, err
 	}
 
 	// The mirror is bare (see ensureMirror); git < 2.35 leaks that core.bare=true
@@ -163,6 +180,45 @@ func Provision(ctx context.Context, cfg Config) (*Workspace, error) {
 	}
 
 	return &Workspace{Dir: wtDir, Branch: branch, baseRef: baseRef, remit: cfg.Remit}, nil
+}
+
+// touchMirror runs the entire per-mirror touch — ensureMirror's clone-or-fetch
+// and config heal, resolving the remit's base branch, and linking a new
+// worktree into the mirror — under that mirror's in-process lock (see
+// mirrorLocks), so a concurrent Provision call against the same mirror cannot
+// interleave a `git config` with this one and collide on git's exclusive,
+// non-retrying config.lock (US-0012 AC-12.2). The lock is released once the
+// worktree is linked; the remaining setup in Provision only touches wtDir, not
+// the shared mirror.
+func touchMirror(ctx context.Context, cfg Config) (baseRef, wtDir, branch string, err error) {
+	mu := mirrorLock(cfg.MirrorDir)
+	mu.Lock()
+	defer mu.Unlock()
+
+	if err := ensureMirror(ctx, cfg.RepoURL, cfg.MirrorDir, cfg.CredentialHelper); err != nil {
+		return "", "", "", err
+	}
+
+	ref, err := runGit(ctx, cfg.MirrorDir, "rev-parse", "--verify", cfg.Remit.BaseBranch)
+	if err != nil {
+		return "", "", "", &SetupError{Op: "base-branch", Err: err}
+	}
+	baseRef = strings.TrimSpace(ref)
+
+	if err := os.MkdirAll(cfg.TasksRoot, 0o700); err != nil {
+		return "", "", "", &SetupError{Op: "worktree", Err: err}
+	}
+	wtDir = filepath.Join(cfg.TasksRoot, cfg.TaskID)
+	branch = branchPrefix + cfg.TaskID
+
+	// --no-checkout defers materialization until the sparse patterns are set, so
+	// the full tree is never written to disk (the remit must never be exceeded,
+	// even for the moment between checkout and sparse configuration).
+	if _, err := runGit(ctx, cfg.MirrorDir, "worktree", "add", "--no-checkout", "-b", branch, wtDir, baseRef); err != nil {
+		return "", "", "", &SetupError{Op: "worktree", Err: err}
+	}
+
+	return baseRef, wtDir, branch, nil
 }
 
 // DiffInsideRemit computes the set of paths the run changed against the base
@@ -235,10 +291,11 @@ func pathInRemit(changed string, patterns []string) bool {
 // it on first use and fetching to refresh it otherwise. The mirror is the shared
 // object store per-task worktrees borrow from: a linked worktree of a bare
 // mirror shares its object store natively, which is the object sharing RFC-0001's
-// "git worktree add --reference against the mirror" phrasing intends. The
-// skeleton runs one in-flight task (RFC-0001 scope), so the refresh needs no
-// cross-task lock yet. credHelper is passed through gitCredArgs to the clone and
-// the fetch, the two network ops that need to authenticate to the origin.
+// "git worktree add --reference against the mirror" phrasing intends. Callers
+// must hold mirrorDir's lock (see mirrorLock) for the duration of this call;
+// ensureMirror does no locking of its own. credHelper is passed through
+// gitCredArgs to the clone and the fetch, the two network ops that need to
+// authenticate to the origin.
 func ensureMirror(ctx context.Context, repoURL, mirrorDir, credHelper string) error {
 	existed := true
 	if _, err := os.Stat(mirrorDir); err != nil {
