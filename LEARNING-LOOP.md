@@ -28,3 +28,40 @@ Format: `date | what escaped | where it should have been caught | lesson | encod
   question as unanswerable, enumerate documented alternative paths for each
   sub-question separately — a blocked path is not a blocked question | spike
   report round-2 section; this entry
+- 2026-07-16 | An agent-produced diff passed the pilot's configured gate
+  (go test) yet would have failed the repo's real CI at the fmt step — the
+  per-repo gate list was a weaker approximation of `make check` | the repo
+  registry's gate config | a pilot gate must include every blocking CI step
+  or state which it omits; deeper fix is decoupling checkout-scope from
+  edit-scope so the gate can be `make check` itself | pilot config gains a
+  gofmt gate; decoupling tracked for an RFC
+- 2026-07-16 | The v0.1.1 git-2.34 workaround forced core.bare=false on the
+  shared mirror and every second provision's fetch then failed; first live
+  runs of two tasks halted at setup | the workaround's own review — fixing a
+  worktree symptom at mirror scope | scope a workaround to the layer that has
+  the symptom (extensions.worktreeConfig + per-worktree override), and heal
+  already-poisoned state idempotently before the op that trips on it |
+  workspace.go invariant-pair comment + regression tests (v0.1.2)
+- 2026-07-16 | A work-item AC written by the lead specified
+  searchCriteria.status=all for the PR probe; the agent implemented it
+  literally and the senior review caught that an abandoned PR on the reused
+  branch name could false-certify a re-run | the AC author's own review — the
+  spec was the bug, the implementation was faithful | red-team acceptance
+  criteria the way docs are red-teamed: ask what states the query can return
+  that the happy path never sees | FindPR queries active-only with a
+  deterministic tie-break (v0.3.0 integration commit)
+- 2026-07-16 | Agent-written test comments cited a nonexistent governed doc id
+  (US-0018, conflating the work-item number with the US id) and a second agent
+  copied it as established style; five sites landed before integration caught
+  it | the review pass of the first branch that introduced it | comments citing
+  doc ids are load-bearing for future agents — verify every cited id exists
+  before merge; one wrong citation propagates by imitation | fixed in the
+  v0.2.0 integration commit; this entry
+- 2026-07-16 | reviewerIdentity compared an Entra object id against a UPN
+  field, which would have made the writer!=scorer guard vacuously pass forever;
+  only the live WIQL-by-OID failure a day earlier made the class visible and
+  the fix was locked by a regression test | the contract between config
+  identity fields and their comparison sites | when one identifier class bug
+  appears (OID vs UPN), audit every comparison the two field kinds feed before
+  the next one fails silently | regression tests lock reviewerIdentity to
+  AgentUserName (v0.3.0)
