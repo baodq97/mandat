@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -50,6 +51,18 @@ func TestHelperProcess(t *testing.T) {
 	session := flagValue(args, "--session-id")
 	if session == "" {
 		session = flagValue(args, "--resume")
+	}
+
+	// Capture the user message (the task prompt on stdin) to a sink file when a
+	// prompt-delivery test asks for one. Only that test sets the sink, so the
+	// other scenarios leave stdin untouched (a child that never reads stdin is
+	// fine; exec ignores the resulting EPIPE on the parent's copy).
+	if sink := os.Getenv("MANDAT_FAKE_PROMPT_SINK"); sink != "" {
+		prompt, _ := io.ReadAll(os.Stdin)
+		if err := os.WriteFile(sink, prompt, 0o644); err != nil {
+			fmt.Fprintln(os.Stderr, "fake claude: write prompt sink:", err)
+			os.Exit(3)
+		}
 	}
 
 	// Every scenario emits the SAME success stream: a system/init echoing the
@@ -120,6 +133,7 @@ func helperArgs() []string {
 // the curated child env, and runs an optional beforeSpawn probe to prove ordering.
 type fakeClaudeSpawner struct {
 	scenario    string
+	promptSink  string
 	got         workspace.SpawnSpec
 	beforeSpawn func(workspace.SpawnSpec)
 }
@@ -132,10 +146,14 @@ func (f *fakeClaudeSpawner) Spawn(ctx context.Context, spec workspace.SpawnSpec)
 	args := append([]string{"-test.run=TestHelperProcess", "--"}, spec.Argv...)
 	cmd := exec.CommandContext(ctx, os.Args[0], args...)
 	cmd.Dir = spec.Dir
-	cmd.Env = append(append([]string(nil), spec.Env...),
+	env := append(append([]string(nil), spec.Env...),
 		"GO_WANT_HELPER_PROCESS=1",
 		"MANDAT_FAKE_SCENARIO="+f.scenario,
 	)
+	if f.promptSink != "" {
+		env = append(env, "MANDAT_FAKE_PROMPT_SINK="+f.promptSink)
+	}
+	cmd.Env = env
 	cmd.Stdin = spec.Stdin
 	cmd.Stdout = spec.Stdout
 	cmd.Stderr = spec.Stderr
@@ -331,6 +349,70 @@ func TestSupervisor_Run_HappyPath(t *testing.T) {
 	}
 	if len(results) != 1 || !results[0].Valid || string(results[0].Raw) != completedResult {
 		t.Errorf("results = %+v, want one valid row carrying the exact bytes", results)
+	}
+}
+
+// TestSupervisor_Run_DeliversTaskPrompt is the live-path proof for this seam: the
+// spawned child actually receives the work item as its user message, not just the
+// role playbook as its system prompt. The fake claude captures its stdin to a sink
+// file; the test asserts the work-item title, acceptance criteria, a remit path,
+// and the tracker id all appear there — so a real agent has a task to act on — and
+// that none of it leaked onto argv (it rides on stdin, per -p reading the prompt
+// from stdin).
+func TestSupervisor_Run_DeliversTaskPrompt(t *testing.T) {
+	ctx := context.Background()
+	store := openStore(t)
+	req := newRequest(t, config.ModelSonnet)
+	req.Task = &task.TaskContract{
+		ID:         fakeTaskID,
+		Title:      "Add retry with backoff to the ADO client",
+		Acceptance: "GIVEN a 429 WHEN the client retries THEN it backs off exponentially and gives up after 5 attempts",
+		Remit: task.Remit{
+			Repo:       "mandat",
+			BaseBranch: "main",
+			Paths:      []string{"internal/tracker/ado/", "internal/tracker/retry.go"},
+		},
+		TrackerRef: task.TrackerRef{
+			System:     task.TrackerAzureDevOps,
+			Org:        "baodo0220",
+			Project:    "mandat-dogfood",
+			WorkItemID: "42",
+			URL:        "https://dev.azure.com/baodo0220/mandat-dogfood/_workitems/edit/42",
+		},
+	}
+
+	sink := filepath.Join(t.TempDir(), "prompt.txt")
+	spawner := &fakeClaudeSpawner{scenario: "completed", promptSink: sink}
+	sup := New(store, spawner, Config{ClaudePath: os.Args[0], MaxBudgetUSD: 5})
+
+	if _, err := sup.Run(ctx, req); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	got, err := os.ReadFile(sink)
+	if err != nil {
+		t.Fatalf("read prompt sink: %v", err)
+	}
+	prompt := string(got)
+	if prompt == "" {
+		t.Fatal("child received an empty user message: the task never reached the live agent")
+	}
+	for _, want := range []string{
+		req.Task.Title,
+		req.Task.Acceptance,
+		"internal/tracker/retry.go",
+		req.Task.TrackerRef.WorkItemID,
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("task prompt missing %q\nprompt:\n%s", want, prompt)
+		}
+	}
+
+	// The work item rides on stdin, never escaped onto the command line.
+	for _, a := range spawner.got.Argv {
+		if strings.Contains(a, req.Task.Title) {
+			t.Errorf("task prompt leaked onto argv %q; it must ride on stdin, not the command line", a)
+		}
 	}
 }
 
@@ -610,6 +692,31 @@ func TestBuildArgv_ADR0006FlagSet(t *testing.T) {
 	assertFlagValue(t, argvR, "--resume", "sess-123")
 	if hasFlag(argvR, "--session-id") {
 		t.Error("resume argv must not carry --session-id")
+	}
+}
+
+// TestTaskPrompt proves the pure render: the user message carries the work item
+// (title, acceptance, remit paths, tracker) and carries NO role instructions —
+// commit/push/ResultContract belong in the playbook system prompt, not here.
+func TestTaskPrompt(t *testing.T) {
+	t.Parallel()
+	tc := task.TaskContract{
+		ID:         "ado-baodo0220-42",
+		Title:      "Add retry with backoff to the ADO client",
+		Acceptance: "backs off exponentially and gives up after 5 attempts",
+		Remit:      task.Remit{Paths: []string{"internal/tracker/ado/", "internal/tracker/retry.go"}},
+		TrackerRef: task.TrackerRef{System: task.TrackerAzureDevOps, WorkItemID: "42", URL: "https://dev.azure.com/x/_workitems/edit/42"},
+	}
+	got := TaskPrompt(tc)
+	for _, want := range []string{tc.Title, tc.Acceptance, "internal/tracker/retry.go", tc.TrackerRef.WorkItemID, string(task.TrackerAzureDevOps)} {
+		if !strings.Contains(got, want) {
+			t.Errorf("TaskPrompt() missing %q\ngot:\n%s", want, got)
+		}
+	}
+	for _, banned := range []string{"commit", "ResultContract", "result.json"} {
+		if strings.Contains(got, banned) {
+			t.Errorf("TaskPrompt() leaked role instruction %q; it belongs in the playbook system prompt", banned)
+		}
 	}
 }
 

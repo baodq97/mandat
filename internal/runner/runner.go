@@ -225,8 +225,13 @@ func (s *Supervisor) run(ctx context.Context, req Request, sessionID string, res
 		Dir:      req.Worktree.Dir,
 		Argv:     argv,
 		Env:      buildEnv(req, resultPath),
-		Stdout:   &stdout,
-		Stderr:   io.Discard,
+		// The work item rides in on stdin as the user message: -p (bare, in the
+		// argv above) makes claude read the prompt from stdin, keeping an
+		// arbitrarily long acceptance body off the command line. The playbook is
+		// the system prompt (--append-system-prompt-file); this is only the task.
+		Stdin:  strings.NewReader(TaskPrompt(*req.Task)),
+		Stdout: &stdout,
+		Stderr: io.Discard,
 	})
 	endedAt := time.Now()
 
