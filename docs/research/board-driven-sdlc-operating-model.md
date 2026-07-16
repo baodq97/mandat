@@ -30,15 +30,38 @@ to resolve:
 
 | Field | Canonical home | Sync direction |
 |---|---|---|
-| State, assignment, priority, backlog rank | **Board** (the human act is the gate/grant) | board → repo (accept commit follows) |
-| Acceptance criteria of the active slice | **Board** — already true: the adapter lifts AC from the card into the `TaskContract`, not from the doc | card AC edited → doc amendment commit, provenance = card revision |
+| Work-item state (`queued → in-progress → in-review → needs-human → done`), assignment, priority, backlog rank | **Board** (the human act is the gate/grant) | board → mandat (work-item lifecycle, spec §4.4) |
+| Governed-doc status (`draft → approved/accepted/done`) | **Repo accept commit** (govkit-gated) | board drag is the ratification signal; the human-authorized accept commit is the authoritative advance. mandat never self-flips governed-doc status (CLAUDE.md) |
+| Acceptance specification | **Repo doc** (authored, red-teamed) | doc → scoped card projection at breakdown. The planner authors a read-only, slice-scoped projection of the doc's AC onto the card; the adapter lifts that card AC into the `TaskContract` (`poll.go` ~L122) as the runtime dispatch contract, a projection, not a competing source |
 | Doc body, design detail, research, decision rationale | **Repo** (where the agent works) | repo → board digest |
 | Operational evidence (PR link, verify verdict, cost, run journal) | **Journal / mandat** | mandat → board comment |
 
-mandat already operates this way implicitly: the card's AC field is the operative truth for
-dispatch. Formalizing it as an ownership matrix plus a **drift detector** (the poll already
-reads the AC each cycle — hash it against the doc's AC; on mismatch, surface a sync proposal
-or hold) closes the drift class by construction.
+Two state machines hide in the State row; keep them separate. The board work-item lifecycle
+(`queued … done`) is board-canonical (spec §4.4). A governed doc's STATUS is not: the board drag
+signals ratification, and the human-authorized accept commit that govkit gates is the
+authoritative advance (mandat never self-flips governed-doc status).
+
+The card AC the adapter lifts into the `TaskContract` is the runtime dispatch contract for one
+slice, a scoped projection of the doc's authored spec, not the spec itself. Formalizing the
+matrix plus an **AC-containment check** closes the drift class at the two events where it can
+appear: at slice-card breakdown and on a source-doc change, verify the card's scoped AC still
+falls within the doc's authored AC, and on escape surface a sync proposal or hold. Not a
+per-poll hash; see Probe.
+
+## Probe — the per-poll-hash premise, falsified (2026-07-16)
+
+An earlier draft made the card canonical for the active slice's AC and metered drift with a
+per-poll hash of card AC against doc AC. A live probe killed that premise. Fetching work item
+#36's `Microsoft.VSTS.Common.AcceptanceCriteria` returned rich-text HTML (`<ol><li><code>…`);
+US-0013's doc AC is Markdown checkboxes (`- [ ] AC-13.x`). They differ in FORMAT and, more to
+the point, in CONTENT: the card carries a scoped restatement of one dispatched slice, the doc
+carries the full authored specification. They are not two copies of one artifact, so a raw hash
+false-positives every cycle and trains operators to mute the signal. Two more facts sink the
+per-poll design: there is no doc-side Markdown AC reader in the tree, and `serve.go`'s
+`dispatchCycle` skips any already-dispatched task (a `LoadTask` hit `continue`s the poll loop),
+so it never re-reads a dispatched card to compare. The premise is wrong and unbuilt on both
+sides. The model moved to repo-canonical AC plus a containment check at the two events where an
+escape can appear (breakdown, source-doc change).
 
 ## Principle 2 — work stations map 1:1 to the governance chain
 
@@ -102,9 +125,10 @@ gate topology; the agent runs work through it. The inherited process is maintain
   like code review. Cost is real but one-time-ish.
 - Rung 1 (conventions) is live now and unblocks board-driven work today; rung 2 (custom
   states) is the milestone that makes the board the sole surface.
-- Risk to weigh in the PRD: the field-ownership matrix depends on the drift detector actually
-  running each poll; without it, board/repo AC divergence is silent — the same failure mode
-  the matrix is meant to kill. The detector is a required AC, not a nice-to-have.
+- Risk to weigh in the PRD: the field-ownership matrix depends on the AC-containment check
+  running at breakdown and on source-doc change; without it, a card can restate a slice's AC
+  outside the doc's authored spec and the divergence is silent. The check is a required AC, not
+  a nice-to-have.
 
 ## Sources (verified this session)
 

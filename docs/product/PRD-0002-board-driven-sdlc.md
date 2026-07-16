@@ -14,7 +14,7 @@ Extends PRD-0001 (the mandate pipeline) with the operating model that runs it. S
 
 The pilot ran the board as flat Basic Issues, one card per implementation slice, and migrated Basic to Agile this session (research doc, Motivation). Two gaps remain. First, no work stations: a reader cannot tell from the board which card is a brainstorm, which is a PRD or tech doc, and which is implementation, so the governed chain PRD → RFC → ADR → US → Code has no visible home on the board. Second, cards are information-poor: the board should be the surface an operator understands and acts on in roughly 10 seconds, but a card today carries a title and a state and little else, while the design detail lives only in the repo docs. A consequence of both: in-review and needs-human exist only as free-text comments, so the two states that most need operator attention are the least legible on the board.
 
-The board is not a report of the work. Under the design thesis mandat already holds (spec §4.4), a human status flip on the tracker is the only act that advances a stage gate, which makes the board both the operational projection of work and the ratification surface. This PRD defines what that projection must carry to be worth deciding from.
+The board is not a report of the work. Under the design thesis mandat already holds (spec §4.4), a human status flip on the tracker is the only act that advances a work-item stage gate, which makes the board both the operational projection of work and the ratification surface. Governed-doc status is the one advance that needs a second act beyond the drag: the accept commit the field-ownership matrix names below. This PRD defines what that projection must carry to be worth deciding from.
 
 ## Field-ownership principle
 
@@ -22,18 +22,21 @@ One canonical home per field, never a mode-switch source of truth. The tempting 
 
 | Field | Canonical home | Sync direction |
 |---|---|---|
-| State, assignment, priority, backlog rank | Board (the human act is the gate or the grant) | board → repo (accept commit follows) |
-| Acceptance criteria of the active slice | Board (the adapter already lifts AC from the card into the `TaskContract`) | card AC edited → doc amendment commit, provenance = card revision |
+| Work-item state (`queued → in-progress → in-review → needs-human → done`), assignment, priority, backlog rank | Board (the human act is the gate or the grant) | board → mandat (work-item lifecycle; spec §4.4) |
+| Governed-doc status (PRD/RFC/ADR/US: `draft → approved/accepted/done`) | Repo accept commit (govkit-gated) | board drag is the ratification signal; the accept commit the human authorizes is the authoritative advance. mandat never self-flips governed-doc status (CLAUDE.md) |
+| Acceptance specification | Repo doc (authored, red-teamed) | doc → scoped card projection at breakdown. The planner authors a read-only, slice-scoped projection of the doc's AC onto the card; the adapter lifts that card AC into the `TaskContract` (`poll.go` ~L122) as the runtime dispatch contract, a projection, not a competing source |
 | Doc body, design detail, decision rationale | Repo (where the agent works) | repo → board digest |
 | Operational evidence (PR link, verify verdict, cost, journal) | Journal / mandat | mandat → board comment |
 
-mandat already operates this way implicitly: the card AC field is the operative truth for dispatch. This PRD formalizes it as an ownership matrix plus a drift detector, and the detector is a required capability, not a nice-to-have, because without it board and repo AC diverge silently, the exact failure mode the matrix exists to kill (research doc, Trade-offs).
+The State row splits two state machines the PRD must not conflate. The board work-item lifecycle (`queued … done`) is board-canonical, and spec §4.4's "only a human tracker flip advances a stage gate" governs it. A governed doc's STATUS is separate: the board drag is the human's ratification signal, but the authoritative advance is the human-authorized accept commit in the repo that govkit gates. mandat never self-flips governed-doc status (CLAUDE.md); the drag authorizes the commit, the commit advances the status.
+
+The card AC the adapter lifts into the `TaskContract` is the runtime dispatch contract for one slice, a projection of the doc's authored spec, not the spec itself. This PRD formalizes the matrix plus an AC-containment check: at slice-card breakdown and on a source-doc change, verify the card's scoped AC still falls within the doc's authored AC. The check fires at those two events, not every poll. The card (rich-text HTML, one scoped slice) and the doc (Markdown, the full spec) legitimately differ in format and scope, so a raw per-poll text compare false-positives every cycle and trains operators to mute it (research doc, Probe).
 
 ## Persona and audience
 
 Primary: the operator or PO who wants to run the SDLC from the board in roughly 10-second decisions, reading a card and dragging it rather than opening the repo. Secondary actors, doing the station work under mandate: the AI RoleAgents, planner, drafter, architect, and reviewer. The `.claude/agents` roles (spec-drafter, sa-architect, ba-analyst, red-teamer) are the dev-time mirror of the product RoleAgents these stations run (research doc, Principle 2).
 
-As AI quality rises the agents do more of the chain and the human gates get rarer, but they do not disappear. Three gates stay human by construction and map to a board act: approve a PRD (drag the `doc:PRD-xxxx` Feature), accept the tech (drag the `doc:RFC/ADR-xxxx` Feature), and ratify Done (drag the User Story to Closed). Assignment is itself a gate, not a new mechanism: Poll only picks up work items assigned to an agent UPN, so the human assigning a card is the act that grants the mandate (spec §4.4; research doc, Principle 2). Humans stand at gates; agents run inside them.
+As AI quality rises the agents do more of the chain and the human gates get rarer, but they do not disappear. Three gates stay human by construction and map to a board act: approve a PRD (drag the `doc:PRD-xxxx` Feature), accept the tech (drag the `doc:RFC/ADR-xxxx` Feature), and ratify Done (drag the User Story to Closed). For the two doc gates the drag is the ratification signal, not the status flip itself: the governed-doc status advances only when the human-authorized accept commit lands and govkit gates it (field-ownership matrix above). Assignment is itself a gate, not a new mechanism: Poll only picks up work items assigned to an agent UPN, so the human assigning a card is the act that grants the mandate (spec §4.4; research doc, Principle 2). Humans stand at gates; agents run inside them.
 
 ## Success metrics
 
@@ -43,7 +46,7 @@ Each metric reads from a surface the design already has (the journal, the config
 |---|---|---|
 | Card self-sufficiency | 100% of active-slice cards carry all four projections: story digest, governed-doc link, per-gate verify verdict, run cost, so the operator decides without opening the repo | card-projection audit against the journal and config sources (research doc, Principle 3) |
 | One card per doc | every governed doc (PRD, RFC, ADR, US) maps to exactly one board object; 1:1, 0 orphans | work-station reconciliation of board objects against `docs/*/INDEX.md` (research doc, Principle 2) |
-| No silent AC drift | 0% of polls pass with an undetected card-vs-doc AC mismatch; every mismatch surfaces a sync proposal or a hold | the drift detector's per-poll hash compare of card AC against doc AC (research doc, Principle 1) |
+| No silent AC drift | every slice card's scoped AC is contained in its doc's authored AC; a card that escapes the spec surfaces a sync proposal or a hold | AC-containment check at breakdown and on source-doc change (research doc, Principle 1) |
 | Gate states are board states | in-review and needs-human are User Story states, not comments; the board mirrors the internal state machine `queued → in-progress → in-review → needs-human → done` 1:1 | `config.tracker.states` populated and mandat writing state instead of commenting (research doc, Principle 4) |
 | Runtime runs inside project rights | 0 Project-Collection-Administrator permissions required at runtime; process and state setup is a one-time PCA act done before mandat operates | runtime board writes succeed under ordinary project rights (research doc, Verified constraint) |
 
@@ -52,7 +55,7 @@ Each metric reads from a surface the design already has (the journal, the config
 In scope, the four capabilities the research doc designs:
 
 - Work-station map: Epic, Feature, and User Story objects mapped 1:1 to the governance chain, with author RoleAgent and human gate per station (research doc, Principle 2).
-- Field-ownership matrix plus drift detector: the matrix above made operative, with the poll hashing card AC against doc AC each cycle and surfacing a sync proposal or a hold on mismatch (research doc, Principle 1).
+- Field-ownership matrix plus AC-containment check: the matrix above made operative. At slice-card breakdown and on a source-doc change, verify the card's scoped AC is contained in the doc's authored AC; a card that escapes the spec surfaces a sync proposal or a hold. The check fires at those two events, not per poll (research doc, Principle 1).
 - Rich-card projection: description digest for a 10-second read, link to the governed doc plus parent ids, a structured per-gate verify-verdict comment, and a run-cost comment. Every enrichment is deterministic projection from an existing source (`run.TotalCostUSD`, the journal, the config); it adds no new judgment. Backlog #34 (bounded gate output on red) is the one missing input and now has a home (research doc, Principle 3).
 - Inherited-process state model: User Story states `In Review` and `Needs Human` added to an inherited process on Agile, with config gaining `tracker.states.in_review` and `tracker.states.needs_human` (config-not-code) so mandat writes state, not only comments (research doc, Principle 4).
 
