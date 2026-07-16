@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/baodq97/mandat/internal/adapter/azuredevops"
 	"github.com/baodq97/mandat/internal/config"
@@ -410,6 +412,7 @@ func newSkeleton(t *testing.T, scenario string) (serveDeps, *fakeADO, task.TaskC
 		Forge:            adapter,
 		Runner:           runner.New(store, &fakeClaudeSpawner{scenario: scenario}, runner.Config{ClaudePath: os.Args[0], MaxBudgetUSD: 5}),
 		Verifier:         verify.New(&fakeProbe{identity: reviewerUser, info: verify.PRInfo{Exists: true, CreatedBy: devUser, URL: skeletonPRURL}}),
+		StateRoot:        t.TempDir(),
 		Provision:        workspace.Provision,
 		Role:             devRole,
 		ReviewerIdentity: reviewerUser,
@@ -579,6 +582,412 @@ func TestWalkingSkeleton_VerifyOperationalErrorHolds(t *testing.T) {
 	if !strings.Contains(comments[2], "held task") || !strings.Contains(comments[2], "transport: connection reset by peer") {
 		t.Errorf("hold comment = %q, want it to name the held task and the verify error", comments[2])
 	}
+}
+
+// TestDispatchCycle_PoolBoundsConcurrency is US-0012 batch 2 test (a): with
+// pool_size 2 and three completed-scenario contracts polled in one cycle, all
+// three reach in-review, each is dispatched exactly once, and the observed peak
+// concurrency the fake spawner records is exactly 2 — dispatchCycle's worker pool
+// genuinely runs tasks side by side, never more than PoolSize at once (AC-12.1,
+// AC-12.6).
+func TestDispatchCycle_PoolBoundsConcurrency(t *testing.T) {
+	contracts := multiTaskContracts(3)
+	deps, tracker, spawner := newDispatchSkeleton(t, contracts, 2, "")
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	dispatchCycle(ctx, deps, &stdout, &stderr)
+
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want empty (no task should error)", stderr.String())
+	}
+	for _, tc := range tracker.contracts {
+		got, err := deps.Store.LoadTask(ctx, tc.ID)
+		if err != nil {
+			t.Fatalf("LoadTask(%s) error = %v", tc.ID, err)
+		}
+		if got.State != task.StateInReview {
+			t.Errorf("task %s state = %q, want %q", tc.ID, got.State, task.StateInReview)
+		}
+	}
+	if got := len(spawner.recordedEnvs()); got != 3 {
+		t.Errorf("spawn count = %d, want 3 (each task dispatched exactly once)", got)
+	}
+	if peak := spawner.peakConcurrency(); peak != 2 {
+		t.Errorf("peak concurrency = %d, want exactly 2", peak)
+	}
+}
+
+// TestDispatchCycle_FailureIsolation is US-0012 batch 2 test (b): with pool_size 2
+// and two contracts, one task's CreatePR fails while its sibling's succeeds. The
+// failure is reported per task on stderr exactly as the pre-batch-2 sequential
+// path does, and never aborts or holds up the sibling: it still reaches in-review
+// (AC-12.5).
+func TestDispatchCycle_FailureIsolation(t *testing.T) {
+	contracts := multiTaskContracts(2)
+	failBranch := "mandat/" + contracts[0].ID
+	deps, _, _ := newDispatchSkeleton(t, contracts, 2, failBranch)
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	dispatchCycle(ctx, deps, &stdout, &stderr)
+
+	if !strings.Contains(stderr.String(), contracts[0].ID) {
+		t.Errorf("stderr = %q, want a per-task error line naming %s", stderr.String(), contracts[0].ID)
+	}
+
+	// The failed task never got far enough to persist a state past in-progress
+	// (its CreatePR error surfaces straight out of runTask with no transition).
+	failed, err := deps.Store.LoadTask(ctx, contracts[0].ID)
+	if err != nil {
+		t.Fatalf("LoadTask(%s) error = %v", contracts[0].ID, err)
+	}
+	if failed.State == task.StateInReview {
+		t.Errorf("failed task %s state = %q, want anything but in-review", contracts[0].ID, failed.State)
+	}
+
+	// The sibling completed normally despite running alongside a failing task.
+	sibling, err := deps.Store.LoadTask(ctx, contracts[1].ID)
+	if err != nil {
+		t.Fatalf("LoadTask(%s) error = %v", contracts[1].ID, err)
+	}
+	if sibling.State != task.StateInReview {
+		t.Errorf("sibling task %s state = %q, want %q", contracts[1].ID, sibling.State, task.StateInReview)
+	}
+	if !strings.Contains(stdout.String(), contracts[1].ID) {
+		t.Errorf("stdout = %q, want the sibling's reached-state line", stdout.String())
+	}
+}
+
+// TestDispatchCycle_PerTaskConfigDirIsolation is US-0012 batch 2 test (c): the two
+// concurrent children dispatchCycle spawns each carry a distinct CLAUDE_CONFIG_DIR,
+// derived per task id under the state root rather than the shared per-role dir
+// (AC-12.7).
+func TestDispatchCycle_PerTaskConfigDirIsolation(t *testing.T) {
+	contracts := multiTaskContracts(2)
+	deps, _, spawner := newDispatchSkeleton(t, contracts, 2, "")
+	ctx := context.Background()
+
+	dispatchCycle(ctx, deps, io.Discard, io.Discard)
+
+	envs := spawner.recordedEnvs()
+	if len(envs) != 2 {
+		t.Fatalf("recorded %d child envs, want 2", len(envs))
+	}
+	seen := make(map[string]bool)
+	for _, env := range envs {
+		v, ok := envValue(env, "CLAUDE_CONFIG_DIR")
+		if !ok || v == "" {
+			t.Fatalf("child env missing CLAUDE_CONFIG_DIR: %v", env)
+		}
+		wantPrefix := filepath.Join(deps.StateRoot, "roles", "dev", "tasks")
+		if !strings.HasPrefix(v, wantPrefix) {
+			t.Errorf("CLAUDE_CONFIG_DIR = %q, want it under %q (per task, not the shared per-role dir)", v, wantPrefix)
+		}
+		seen[v] = true
+	}
+	if len(seen) != 2 {
+		t.Errorf("distinct CLAUDE_CONFIG_DIR values = %d, want 2 (each concurrent child must get its own)", len(seen))
+	}
+}
+
+// TestDispatchCycle_PoolOneIsSequential is US-0012 batch 2 test (d): pool_size 1
+// dispatches one task at a time, so the observed peak concurrency is exactly 1 —
+// the pre-batch-2 sequential behavior, unchanged.
+func TestDispatchCycle_PoolOneIsSequential(t *testing.T) {
+	contracts := multiTaskContracts(3)
+	deps, tracker, spawner := newDispatchSkeleton(t, contracts, 1, "")
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	dispatchCycle(ctx, deps, &stdout, &stderr)
+
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want empty", stderr.String())
+	}
+	for _, tc := range tracker.contracts {
+		got, err := deps.Store.LoadTask(ctx, tc.ID)
+		if err != nil {
+			t.Fatalf("LoadTask(%s) error = %v", tc.ID, err)
+		}
+		if got.State != task.StateInReview {
+			t.Errorf("task %s state = %q, want %q", tc.ID, got.State, task.StateInReview)
+		}
+	}
+	if peak := spawner.peakConcurrency(); peak != 1 {
+		t.Errorf("peak concurrency = %d, want 1 (pool_size 1 must serialize dispatch)", peak)
+	}
+}
+
+// TestDispatchLimit is US-0012 AC-12.8: the aggregate-budget admission bound. The
+// derive rule (max_usd_in_flight unset) caps concurrency at exactly pool_size; an
+// explicit, tighter ceiling throttles to floor(ceiling / max_usd_per_run) below the
+// pool; a looser ceiling never raises it above the pool; and the limit never drops
+// below 1.
+func TestDispatchLimit(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name                      string
+		poolSize                  int
+		maxUSDPerRun, maxInFlight float64
+		want                      int
+	}{
+		{"derive caps at pool", 4, 5, 0, 4},
+		{"pool one stays sequential", 1, 5, 0, 1},
+		{"explicit tighter ceiling throttles below pool", 4, 5, 10, 2},
+		{"explicit looser ceiling never exceeds pool", 2, 5, 100, 2},
+		{"ceiling equal to one run floors to one", 4, 5, 5, 1},
+		{"unset per-run leaves the pool bound", 3, 0, 0, 3},
+		{"zero pool floors to one", 0, 5, 0, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := dispatchLimit(tc.poolSize, tc.maxUSDPerRun, tc.maxInFlight); got != tc.want {
+				t.Errorf("dispatchLimit(%d, %v, %v) = %d, want %d", tc.poolSize, tc.maxUSDPerRun, tc.maxInFlight, got, tc.want)
+			}
+		})
+	}
+}
+
+// multiTaskContracts builds n distinct, independently valid dev-task TaskContracts
+// against the in-registry "mandat" repo, for dispatchCycle tests that poll more
+// than the single work-item-42 fixture newSkeleton's fakeADO serves.
+func multiTaskContracts(n int) []task.TaskContract {
+	out := make([]task.TaskContract, 0, n)
+	for i := range n {
+		id := fmt.Sprintf("ado-%s-dispatch-%d", skeletonOrg, i+1)
+		workItemID := fmt.Sprintf("%d", 900+i)
+		out = append(out, task.TaskContract{
+			ID: id,
+			TrackerRef: task.TrackerRef{
+				System:     task.TrackerAzureDevOps,
+				Org:        skeletonOrg,
+				Project:    skeletonProject,
+				WorkItemID: workItemID,
+				URL:        "https://example.test/_apis/wit/workItems/" + workItemID,
+			},
+			Type:       task.TypeDevTask,
+			Title:      "dispatchCycle pool test task",
+			Acceptance: "reaches in-review",
+			State:      task.StateQueued,
+			Role:       "dev",
+			Remit: task.Remit{
+				Repo:       "mandat",
+				BaseBranch: "main",
+				Paths:      []string{"cmd/mandat/", "internal/buildinfo/"},
+			},
+			AssignedTo:    devUser,
+			SchemaVersion: task.SchemaVersion,
+		})
+	}
+	return out
+}
+
+// newDispatchSkeleton composes dispatchCycle's dependencies from a fixed set of
+// contracts, mirroring newSkeleton but injecting a multi-contract taskTracker and a
+// concurrencySpawner so a dispatchCycle test can poll several contracts in one
+// cycle and observe peak in-flight concurrency and per-child env. failBranch, when
+// non-empty, scripts the fake forge to fail CreatePR for that one branch
+// (US-0012 AC-12.5's failure-isolation test).
+func newDispatchSkeleton(t *testing.T, contracts []task.TaskContract, poolSize int, failBranch string) (serveDeps, *fakeMultiTracker, *concurrencySpawner) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required to exercise the workspace plane")
+	}
+
+	origin := newBareOrigin(t)
+	registry := &config.Config{
+		Repos: map[string]config.RepoConfig{
+			"mandat": {
+				URL:        origin,
+				BaseBranch: "main",
+				Paths:      []string{"cmd/mandat/", "internal/buildinfo/"},
+				Gates:      []string{"true"},
+			},
+		},
+	}
+	store := openStore(t)
+	mirror := filepath.Join(t.TempDir(), "mirror.git")
+
+	// Warm the mirror with one throwaway Provision call before any concurrent
+	// dispatch: the per-mirror lock (US-0012 AC-12.2) serializes touches of an
+	// already-warm mirror, but the very first clone into a cold one is outside
+	// this test's own scope to prove race-free, and workspace's own fixture
+	// (TestProvision_ConcurrentSameRepoWarmMirrorNoRace) warms first for the same
+	// reason.
+	warmupRemit := task.Remit{Repo: "mandat", BaseBranch: "main", Paths: []string{"cmd/mandat/", "internal/buildinfo/"}}
+	if _, err := workspace.Provision(context.Background(), workspace.Config{
+		RepoURL:   origin,
+		MirrorDir: mirror,
+		TasksRoot: t.TempDir(),
+		TaskID:    "dispatch-warmup",
+		Remit:     warmupRemit,
+	}); err != nil {
+		t.Fatalf("warm-up Provision() error = %v", err)
+	}
+
+	tracker := &fakeMultiTracker{contracts: contracts}
+	forge := &fakePRForge{failBranch: failBranch}
+	spawner := &concurrencySpawner{}
+
+	devRole := role.Role{
+		Name:            "dev",
+		Mandate:         role.MandateRef{AgentIdentityID: "11111111-1111-1111-1111-111111111111", AgentUserID: devUser},
+		Playbook:        "/etc/mandat/playbooks/dev.md",
+		AutonomyCeiling: config.CeilingDraftPR,
+		ModelTier:       config.ModelSonnet,
+	}
+
+	deps := serveDeps{
+		Store:            store,
+		Tracker:          tracker,
+		Forge:            forge,
+		Runner:           runner.New(store, spawner, runner.Config{ClaudePath: os.Args[0], MaxBudgetUSD: 5}),
+		Verifier:         verify.New(&fakeProbe{identity: reviewerUser, info: verify.PRInfo{Exists: true, CreatedBy: devUser, URL: skeletonPRURL}}),
+		Provision:        workspace.Provision,
+		Role:             devRole,
+		ReviewerIdentity: reviewerUser,
+		InProgressState:  "Doing",
+		RepoURL:          func(repo string) (string, error) { return registry.Repos[repo].URL, nil },
+		Gates:            func(repo string) []string { return registry.Repos[repo].Gates },
+		MirrorDir:        func(string) string { return mirror },
+		TasksRoot:        t.TempDir(),
+		RoleUser:         "mandat-dev",
+		Home:             t.TempDir(),
+		ConfigDir:        t.TempDir(),
+		StateRoot:        t.TempDir(),
+		HarnessVersion:   "test-harness",
+		PoolSize:         poolSize,
+		MaxUSDPerRun:     1,
+	}
+	return deps, tracker, spawner
+}
+
+// fakeMultiTracker is the taskTracker double for dispatchCycle tests: Poll always
+// returns its fixed contract set (no WIQL round trip needed), and Comment/
+// ApplyStatus are safe under the concurrent calls dispatchCycle's worker pool
+// makes.
+type fakeMultiTracker struct {
+	contracts []task.TaskContract
+
+	mu       sync.Mutex
+	comments []string
+	statuses []string
+}
+
+func (f *fakeMultiTracker) Poll(context.Context) ([]task.TaskContract, error) {
+	return append([]task.TaskContract(nil), f.contracts...), nil
+}
+
+func (f *fakeMultiTracker) Comment(_ context.Context, _, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.comments = append(f.comments, text)
+	return nil
+}
+
+func (f *fakeMultiTracker) ApplyStatus(_ context.Context, _, status string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.statuses = append(f.statuses, status)
+	return nil
+}
+
+// fakePRForge is the prForge double for dispatchCycle tests: it hands back a
+// distinct fake PR per call, safe under concurrent CreatePR calls, and can be
+// scripted via failBranch to fail exactly one task's PR open so a test can prove
+// failure isolation (AC-12.5) without touching a live ADO fixture.
+type fakePRForge struct {
+	failBranch string
+
+	mu    sync.Mutex
+	calls int
+}
+
+func (f *fakePRForge) CreatePR(_ context.Context, in azuredevops.CreatePRInput) (azuredevops.CreatePRResult, error) {
+	if f.failBranch != "" && in.Branch == f.failBranch {
+		return azuredevops.CreatePRResult{}, fmt.Errorf("fakePRForge: forced CreatePR failure for branch %s", in.Branch)
+	}
+	f.mu.Lock()
+	f.calls++
+	id := f.calls
+	f.mu.Unlock()
+	return azuredevops.CreatePRResult{
+		ID:        id,
+		URL:       fmt.Sprintf("https://dev.azure.com/%s/_git/%s/pullrequest/%d", skeletonOrg, in.Repo, id),
+		CreatedBy: devUser,
+	}, nil
+}
+
+// concurrencySpawner is the Spawner double dispatchCycle's concurrency tests
+// inject in place of fakeClaudeSpawner: it re-execs this test binary as the same
+// §9 fake claude (TestHelperProcess, always the "completed" scenario), but under a
+// mutex it also tracks how many calls are simultaneously inside Spawn (peak
+// in-flight) and records every call's env, so a test can assert on the pool's
+// observed concurrency and on each concurrent child's distinct per-task env.
+type concurrencySpawner struct {
+	mu       sync.Mutex
+	inFlight int
+	peak     int
+	envs     [][]string
+}
+
+func (s *concurrencySpawner) Spawn(ctx context.Context, spec workspace.SpawnSpec) error {
+	s.mu.Lock()
+	s.inFlight++
+	if s.inFlight > s.peak {
+		s.peak = s.inFlight
+	}
+	s.envs = append(s.envs, append([]string(nil), spec.Env...))
+	s.mu.Unlock()
+
+	defer func() {
+		s.mu.Lock()
+		s.inFlight--
+		s.mu.Unlock()
+	}()
+
+	// Held for a beat while counted as in-flight, so two goroutines the worker
+	// pool launched close together are reliably observed overlapping regardless
+	// of how fast the surrounding git plumbing runs on the test machine.
+	time.Sleep(100 * time.Millisecond)
+
+	args := append([]string{"-test.run=TestHelperProcess", "--"}, spec.Argv...)
+	cmd := exec.CommandContext(ctx, os.Args[0], args...)
+	cmd.Dir = spec.Dir
+	cmd.Env = append(append([]string(nil), spec.Env...),
+		"GO_WANT_HELPER_PROCESS=1",
+		"MANDAT_FAKE_SCENARIO=completed",
+	)
+	cmd.Stdin = spec.Stdin
+	cmd.Stdout = spec.Stdout
+	cmd.Stderr = spec.Stderr
+	return cmd.Run()
+}
+
+func (s *concurrencySpawner) peakConcurrency() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.peak
+}
+
+func (s *concurrencySpawner) recordedEnvs() [][]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([][]string(nil), s.envs...)
+}
+
+// envValue mirrors internal/runner's own test helper of the same name: it looks up
+// KEY=value in a child's recorded env slice.
+func envValue(env []string, key string) (string, bool) {
+	prefix := key + "="
+	for _, e := range env {
+		if v, ok := strings.CutPrefix(e, prefix); ok {
+			return v, true
+		}
+	}
+	return "", false
 }
 
 func openStore(t *testing.T) *journal.Store {

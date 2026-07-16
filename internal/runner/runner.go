@@ -184,6 +184,18 @@ func (s *Supervisor) run(ctx context.Context, req Request, sessionID string, res
 	}
 	resultPath := filepath.Join(req.Worktree.Dir, result.Path)
 
+	// req.Home and req.ConfigDir are per-task dirs (US-0012 AC-12.7) with no prior
+	// provisioning step, unlike the shared per-role dirs, so the runner creates them
+	// fresh here. An empty CLAUDE_CONFIG_DIR needs no seeding: auth reaches the
+	// child through the allow-listed env vars in buildEnv below, not through
+	// anything already on disk.
+	if err := os.MkdirAll(req.Home, 0o700); err != nil {
+		return Outcome{}, fmt.Errorf("runner: create home dir %s: %w", req.Home, err)
+	}
+	if err := os.MkdirAll(req.ConfigDir, 0o700); err != nil {
+		return Outcome{}, fmt.Errorf("runner: create claude config dir %s: %w", req.ConfigDir, err)
+	}
+
 	if req.GitCredentialHelper != "" {
 		if err := configureGitCredential(ctx, req.Worktree.Dir, req.GitCredentialHelper); err != nil {
 			return Outcome{}, err
