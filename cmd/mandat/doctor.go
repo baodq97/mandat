@@ -60,6 +60,7 @@ func doctor(args []string, stdout, stderr io.Writer) int {
 		gitVersionCheck,
 		func(c context.Context) checkResult { return sqliteCheck(c, *dbPath) },
 		trackerCheckFor(cfg, *roleName),
+		func(context.Context) checkResult { return reviewerIdentityCheck(cfg) },
 		func(context.Context) checkResult { return diskCheck(*dbPath) },
 	}
 	return runChecks(ctx, checks, stdout)
@@ -172,6 +173,28 @@ func trackerCheckFor(cfg *config.Config, roleName string) func(context.Context) 
 		}
 		return checkResult{name: name, required: true, ok: true, detail: "delegated token acquired and WIQL poll reachable"}
 	}
+}
+
+// reviewerIdentityCheck confirms a Reviewer role is configured with a UPN
+// distinct from every other role's (writer != scorer, RFC-0001 AC-27), so a
+// missing or colliding reviewer identity surfaces here rather than only at
+// verify time, task by task. A missing reviewer role only warns: it is a
+// valid (if degraded) config, not a blocking misconfiguration.
+func reviewerIdentityCheck(cfg *config.Config) checkResult {
+	const name = "reviewer identity"
+	rc, ok := cfg.Roles["reviewer"]
+	if !ok || rc.AgentUserName == "" {
+		return checkResult{name: name, required: false, detail: "no reviewer role configured: verification will hold every task at the probe (RFC-0001 AC-27)"}
+	}
+	for other, orc := range cfg.Roles {
+		if other == "reviewer" || orc.AgentUserName == "" {
+			continue
+		}
+		if orc.AgentUserName == rc.AgentUserName {
+			return checkResult{name: name, required: true, detail: fmt.Sprintf("reviewer and %s share agent_user_name %q (writer must differ from scorer, RFC-0001 AC-27)", other, rc.AgentUserName)}
+		}
+	}
+	return checkResult{name: name, required: true, ok: true, detail: "reviewer " + rc.AgentUserName + " is distinct from every other role"}
 }
 
 // diskCheck confirms the directory holding the DB and worktrees is present and
