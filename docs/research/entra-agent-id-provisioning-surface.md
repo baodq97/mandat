@@ -79,6 +79,23 @@ named `AgentIdentity*` scopes az cannot request. Needs a minimal-role test user.
 ensure steps must therefore catch a 403 and print the Entra PowerShell alternative
 (`Connect-Entra -Scopes` with the exact scope names) instead of failing opaquely.
 
+## Spike round 2 (2026-07-16): the ADO discovery chain for US-0013 AC-13.1, pinned
+
+The US-0013 red-team's kill criterion asked whether an az-only token can enumerate the ADO
+org, projects, and repo URLs without a PAT. Probed on the dogfood org — it can, end to end,
+using the ADO-resource token (`az account get-access-token --resource
+499b84ac-1321-427f-aa17-267ca6975798`, the well-known ADO resource id):
+
+1. `GET https://app.vssps.visualstudio.com/_apis/profile/profiles/me` → member id (200)
+2. `GET https://app.vssps.visualstudio.com/_apis/accounts?memberId={id}` → org list (200)
+3. `GET https://dev.azure.com/{org}/_apis/projects` → projects (200)
+4. `GET https://dev.azure.com/{org}/{project}/_apis/git/repositories` → repo names + remote
+   URLs (200)
+
+Full happy-path discovery confirmed: org, projects, and clone URLs all come back from the
+az session alone. The kill criterion is cleared; `init` discovery is real, not a wizard
+around a template.
+
 ## Open questions for the spike (pin before implementation)
 - Whether agent-user UPN domain selection (verified domains of the tenant) needs a picker.
 - Propagation lag handling (entitlement right after user creation failed once in the
