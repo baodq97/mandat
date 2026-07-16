@@ -184,12 +184,17 @@ func runTask(ctx context.Context, d serveDeps, tc task.TaskContract) (orchestrat
 	// probe has a real PR to confirm: the fake claude self-reports a pr_url in its
 	// artifact but opens nothing, so the composition root is what actually opens the
 	// PR here (the productionized runner opens it in-band; this seam stays the same).
+	// WorkItemID passes the source work item so ADO links the PR at create time: this
+	// populates the PR's own work-item refs AND writes the ArtifactLink relation back
+	// onto the work item (verified live against ADO), which is what makes the work
+	// item's UI show the PR without a second round-trip.
 	pr, err := d.Forge.CreatePR(ctx, azuredevops.CreatePRInput{
 		Repo:        tc.Remit.Repo,
 		Branch:      ws.Branch,
 		BaseBranch:  tc.Remit.BaseBranch,
 		Title:       tc.Title,
 		Description: prDescription(&tc),
+		WorkItemID:  tc.TrackerRef.WorkItemID,
 	})
 	if err != nil {
 		return state, fmt.Errorf("serve: open draft PR for task %s: %w", tc.ID, err)

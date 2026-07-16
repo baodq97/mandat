@@ -146,7 +146,7 @@ func TestWalkingSkeleton_HappyPath(t *testing.T) {
 		t.Errorf("run cost/usage = %v / %s, want the stream's telemetry", run.TotalCostUSD, run.Usage)
 	}
 
-	// Tracker lifecycle feedback (US-0018): the work item moved to the configured
+	// Tracker lifecycle feedback (US-0011): the work item moved to the configured
 	// in-progress state before the runner spawned, and the source work item got a
 	// dispatch comment naming the task and role plus a comment carrying the PR URL.
 	if statuses := ado.statusCalls(); len(statuses) != 1 || !strings.Contains(statuses[0], "Doing") {
@@ -211,13 +211,59 @@ func TestWalkingSkeleton_NeedsHumanHold(t *testing.T) {
 	}
 
 	// Tracker lifecycle feedback still ran (dispatch), and the hold posts a
-	// comment naming the reason since the run produced no ResultContract (US-0018).
+	// comment naming the reason since the run produced no ResultContract (US-0011).
 	comments := ado.commentCalls()
 	if len(comments) != 2 {
 		t.Fatalf("Comment calls = %v, want 2 (dispatch + needs-human hold)", comments)
 	}
 	if !strings.Contains(comments[1], "held task") || !strings.Contains(comments[1], "ResultContract") {
 		t.Errorf("hold comment = %q, want it to name the held task and the runner reason", comments[1])
+	}
+}
+
+// TestWalkingSkeleton_TrackerFeedbackBestEffort proves the best-effort invariant
+// (US-0011): the source work item's state PATCH and comment POST both 500, yet
+// the pipeline still reaches the same terminal outcome as the happy path — the
+// journal, not the tracker, is the pipeline's own source of truth, so a tracker
+// write failure logs a warning and never holds up or diverts the run.
+func TestWalkingSkeleton_TrackerFeedbackBestEffort(t *testing.T) {
+	deps, ado, tc := newSkeleton(t, "completed")
+	ado.setFailTrackerWrites(true)
+	ctx := context.Background()
+
+	state, err := runTask(ctx, deps, tc)
+	if err != nil {
+		t.Fatalf("runTask() error = %v", err)
+	}
+	if state != orchestrator.StateInReview {
+		t.Fatalf("final state = %q, want %q (tracker-write failures must not change the pipeline outcome)", state, orchestrator.StateInReview)
+	}
+
+	events, err := deps.Store.Events(ctx, tc.ID)
+	if err != nil {
+		t.Fatalf("Events() error = %v", err)
+	}
+	// Same transition sequence as the happy path: a 500'd tracker write never
+	// journals a different event or holds the task for a human.
+	wantStates := []string{"queued", "in-progress", "in-review"}
+	if got := transitionStates(events); !slices.Equal(got, wantStates) {
+		t.Errorf("transition to_states = %v, want %v", got, wantStates)
+	}
+
+	// The draft PR still opened even though the tracker writes around it 500'd.
+	if pr := findAct(events, actPROpened); pr == nil || pr.ActingIdentity != devUser {
+		t.Fatalf("pr_opened row = %+v, want acting identity %q", pr, devUser)
+	}
+	if !ado.prCreated() {
+		t.Error("no draft-PR POST reached the recorded ADO fixture")
+	}
+
+	// The pipeline still attempted both tracker writes; the fixture just 500'd them.
+	if statuses := ado.statusCalls(); len(statuses) != 1 {
+		t.Errorf("ApplyStatus calls = %v, want exactly 1 attempted despite the 500", statuses)
+	}
+	if comments := ado.commentCalls(); len(comments) != 2 {
+		t.Errorf("Comment calls = %v, want 2 attempted (dispatch + PR opened) despite the 500s", comments)
 	}
 }
 
@@ -359,14 +405,15 @@ func runIDFromEvents(events []journal.JournalEvent) string {
 // fakeADO is the recorded-ADO double: it replays canned WIQL, work-item, and draft-PR
 // responses so no test dials dev.azure.com, and records whether a PR POST arrived so
 // the needs-human variant can prove the pipeline never advanced. It also records
-// every ApplyStatus and Comment call so the tracker-feedback tests (US-0018) can
+// every ApplyStatus and Comment call so the tracker-feedback tests (US-0011) can
 // assert on the writes serve makes back onto the source work item.
 type fakeADO struct {
-	srv      *httptest.Server
-	mu       sync.Mutex
-	pr       bool
-	statuses []string
-	comments []string
+	srv               *httptest.Server
+	mu                sync.Mutex
+	pr                bool
+	statuses          []string
+	comments          []string
+	failTrackerWrites bool
 }
 
 func newFakeADO(t *testing.T) *fakeADO {
@@ -396,14 +443,24 @@ func (f *fakeADO) handle(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		f.mu.Lock()
 		f.statuses = append(f.statuses, string(body))
+		fail := f.failTrackerWrites
 		f.mu.Unlock()
+		if fail {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{}`))
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/workitems/42/comments"):
 		body, _ := io.ReadAll(r.Body)
 		f.mu.Lock()
 		f.comments = append(f.comments, string(body))
+		fail := f.failTrackerWrites
 		f.mu.Unlock()
+		if fail {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{}`))
 	default:
@@ -427,6 +484,15 @@ func (f *fakeADO) commentCalls() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.comments...)
+}
+
+// setFailTrackerWrites flips the work-item state PATCH and comment POST endpoints
+// to a 500, so a test can exercise the tracker-feedback best-effort path (US-0011)
+// without touching the poll/work-item-read/PR endpoints the same fixture serves.
+func (f *fakeADO) setFailTrackerWrites(fail bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failTrackerWrites = fail
 }
 
 // fakeTokenProvider is the injected identity seam: a fixed token, no live mint, so
