@@ -524,7 +524,10 @@ func TestWalkingSkeleton_ReviewerProbe_CreatedByMismatchHolds(t *testing.T) {
 // failed-check Verdict), the task must not stay in-progress forever with no
 // journal act and no tracker feedback. It must journal a verify_error act
 // carrying the error text, transition to needs-human, and attempt a hold
-// comment — the same shape the setup-failed path uses.
+// comment — the same shape the setup-failed path uses. It must also journal a
+// gate_rerun act carrying the green gates the verifier collected before the
+// probe's transport error (AC-25): the observability gap this closes is that a
+// later check's operational error must not drop gates that DID run.
 func TestWalkingSkeleton_VerifyOperationalErrorHolds(t *testing.T) {
 	deps, ado, tc := newSkeleton(t, "completed")
 	deps.Verifier = verify.New(&fakeProbe{identity: reviewerUser, err: errors.New("transport: connection reset by peer")})
@@ -542,12 +545,23 @@ func TestWalkingSkeleton_VerifyOperationalErrorHolds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Events() error = %v", err)
 	}
+	gr := findAct(events, actGateRerun)
+	if gr == nil || gr.ActingIdentity != reviewerUser {
+		t.Fatalf("gate_rerun row = %+v, want acting identity %q", gr, reviewerUser)
+	}
+	if !strings.Contains(string(gr.Detail), `"command":"true"`) || !strings.Contains(string(gr.Detail), `"exit_code":0`) {
+		t.Errorf("gate_rerun detail = %s, want the green gate the verifier collected before the probe error", gr.Detail)
+	}
+
 	ve := findAct(events, actVerifyError)
 	if ve == nil {
 		t.Fatal("verify_error act was not journaled")
 	}
 	if !strings.Contains(string(ve.Detail), "transport: connection reset by peer") {
 		t.Errorf("verify_error detail = %s, want it to carry the probe's error text", ve.Detail)
+	}
+	if gr.Seq >= ve.Seq {
+		t.Errorf("gate_rerun seq %d, verify_error seq %d, want gate_rerun to journal first (mirrors the success path)", gr.Seq, ve.Seq)
 	}
 
 	ri := findAct(events, string(orchestrator.EventResultInvalid))
