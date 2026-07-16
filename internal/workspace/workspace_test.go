@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/baodq97/mandat/internal/task"
@@ -129,6 +130,84 @@ func TestProvision_SetupFailureHasNoFallback(t *testing.T) {
 	var se *SetupError
 	if !errors.As(err, &se) {
 		t.Fatalf("Provision() error = %v, want *SetupError", err)
+	}
+}
+
+func TestProvision_ConcurrentSameRepoWarmMirrorNoRace(t *testing.T) {
+	t.Parallel()
+
+	// Warm the mirror with a first provision, then fire two more concurrent
+	// Provision calls against that same warm mirror — the case where the
+	// idempotent config heal in ensureMirror runs on every call and, unlocked,
+	// could race a concurrent clone/fetch/worktree-add and collide on git's
+	// exclusive config.lock (US-0012 AC-12.2).
+	origin := newBareOrigin(t)
+	mirrorDir := filepath.Join(t.TempDir(), "mirror.git")
+	tasksRoot := t.TempDir()
+	remit := task.Remit{Repo: "mandat", BaseBranch: "main", Paths: []string{"cmd/mandat/", "internal/buildinfo/"}}
+
+	warm := Config{RepoURL: origin, MirrorDir: mirrorDir, TasksRoot: tasksRoot, TaskID: "ado-baodo0220-warm", Remit: remit}
+	if _, err := Provision(context.Background(), warm); err != nil {
+		t.Fatalf("warm-up Provision() error = %v, want nil", err)
+	}
+
+	taskIDs := []string{"ado-baodo0220-race-a", "ado-baodo0220-race-b"}
+	var wg sync.WaitGroup
+	results := make([]*Workspace, len(taskIDs))
+	errs := make([]error, len(taskIDs))
+	for i, id := range taskIDs {
+		wg.Add(1)
+		go func(i int, id string) {
+			defer wg.Done()
+			cfg := Config{RepoURL: origin, MirrorDir: mirrorDir, TasksRoot: tasksRoot, TaskID: id, Remit: remit}
+			results[i], errs[i] = Provision(context.Background(), cfg)
+		}(i, id)
+	}
+	wg.Wait()
+
+	for i, id := range taskIDs {
+		if errs[i] != nil {
+			var se *SetupError
+			if errors.As(errs[i], &se) {
+				t.Fatalf("concurrent Provision(%s) = %v, want nil (no spurious SetupError against a warm mirror)", id, se)
+			}
+			t.Fatalf("concurrent Provision(%s) error = %v, want nil", id, errs[i])
+		}
+		assertExists(t, filepath.Join(results[i].Dir, "cmd/mandat/main.go"))
+		assertExists(t, filepath.Join(results[i].Dir, "internal/buildinfo/build.go"))
+	}
+}
+
+func TestProvision_ConcurrentDifferentReposDoNotShareALock(t *testing.T) {
+	t.Parallel()
+
+	// Two distinct repos (distinct mirror directories) provisioned at the same
+	// time must not serialize each other: each gets its own per-mirror lock, so
+	// both complete on their own, independent of the other.
+	remit := task.Remit{Repo: "mandat", BaseBranch: "main", Paths: []string{"cmd/mandat/", "internal/buildinfo/"}}
+	tasksRoot := t.TempDir()
+	configs := []Config{
+		{RepoURL: newBareOrigin(t), MirrorDir: filepath.Join(t.TempDir(), "mirror-a.git"), TasksRoot: tasksRoot, TaskID: "ado-baodo0220-repo-a", Remit: remit},
+		{RepoURL: newBareOrigin(t), MirrorDir: filepath.Join(t.TempDir(), "mirror-b.git"), TasksRoot: tasksRoot, TaskID: "ado-baodo0220-repo-b", Remit: remit},
+	}
+
+	var wg sync.WaitGroup
+	results := make([]*Workspace, len(configs))
+	errs := make([]error, len(configs))
+	for i, cfg := range configs {
+		wg.Add(1)
+		go func(i int, cfg Config) {
+			defer wg.Done()
+			results[i], errs[i] = Provision(context.Background(), cfg)
+		}(i, cfg)
+	}
+	wg.Wait()
+
+	for i := range configs {
+		if errs[i] != nil {
+			t.Fatalf("concurrent Provision() for repo %d error = %v, want nil", i, errs[i])
+		}
+		assertExists(t, filepath.Join(results[i].Dir, "cmd/mandat/main.go"))
 	}
 }
 
