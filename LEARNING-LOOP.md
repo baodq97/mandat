@@ -93,3 +93,13 @@ Format: `date | what escaped | where it should have been caught | lesson | encod
   runbook lists ALL four steps: store row, worktree dir, worktree prune,
   branch -D | board item #25 (requeue command) carries the evidence; this
   entry
+- 2026-07-16 | A four-concern work item (pool loop + drain + per-task env
+  isolation + budget admission, ~540 lines with tests) died mid-run twice at
+  the same ~17-18 minute mark with no ResultContract, indifferent to a 2x
+  budget raise; two runs of spend produced zero shipped value | the work-item
+  authoring step - the PO sized a story for a senior engineer and handed it
+  to a bounded headless junior | size work items for the role's real ceiling
+  (single-concern, one file area, one test surface); when a run dies with no
+  contract, do not re-run bigger - split or escalate the model tier; salvage
+  the paid partial diff as reviewable draft input | this entry; WI 28 record
+  carries the timeline
