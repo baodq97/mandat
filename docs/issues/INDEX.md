@@ -14,5 +14,5 @@
 | [US-0010](US-0010-cmd-wiring-end-to-end.md) | cmd wiring — serve dispatch loop running the skeleton end to end | done | baodq97 | 2026-07-16 |
 | [US-0011](US-0011-tracker-lifecycle-feedback.md) | Tracker lifecycle feedback — in-progress state, PR link, and outcome comments | done | baodq97 | 2026-07-16 |
 | [US-0012](US-0012-concurrent-task-dispatch.md) | Concurrent task dispatch (runner pool slice) | done | baodq97 | 2026-07-16 |
-| [US-0013](US-0013-first-run-init.md) | First-run experience — `mandat init` guided setup | open | baodq97 | 2026-07-16 |
+| [US-0013](US-0013-first-run-init.md) | First-run experience — `mandat init` guided setup | in-progress | baodq97 | 2026-07-16 |
 | [US-0014](US-0014-provision-ladder.md) | Provisioning ladder — `mandat provision` ensure-flows for Entra Agent ID | open | baodq97 | 2026-07-16 |

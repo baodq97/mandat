@@ -1,7 +1,7 @@
 ---
 id: US-0013
 title: First-run experience — `mandat init` guided setup
-status: open
+status: in-progress
 owner: baodq97
 date: 2026-07-16
 priority: P2
