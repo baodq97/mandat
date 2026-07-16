@@ -70,13 +70,15 @@ Graph or ADO write calls of its own.
 
 Automating the Entra provisioning ceremony (blueprint creation, agent identity creation,
 paired agent user creation, `oauth2PermissionGrants`, and ADO user entitlements, per
-GETTING-STARTED §2, the manual runbook this covers) is deferred to a phase 2 story. The
-Graph agent-identity surface is beta and the ceremony needs a Global Administrator
-delegated token that `init` running as the operator does not hold. Automating it needs its
-own spike and RFC to settle the token-acquisition and consent model, not a silent extension
-of this story's scope. Phase-2 design target: config-writing and token-minting stay
-separate commands, mirroring the `aws configure sso` / `aws sso login` split (survey
-patterns 1, 11).
+GETTING-STARTED §2, the manual runbook this covers) is chartered as US-0014
+(`mandat provision`), not this story. `docs/research/entra-agent-id-provisioning-surface.md`
+(verified 2026-07-16) corrects the prior assumption here: the write surface is documented at
+graph-rest-1.0, not beta, and the ceremony does not need a Global Administrator token. What
+stays privileged is the one-time Agent ID Developer or Administrator role for blueprint
+creation, the two admin-consent actions (granting the blueprint's own app permission, and the
+ADO `oauth2PermissionGrant`), and ADO org admin for entitlements. Phase-2 design target:
+config-writing and token-minting stay separate commands, mirroring the `aws configure sso`
+/ `aws sso login` split (survey patterns 1, 11).
 
 ## Acceptance criteria
 
@@ -176,5 +178,6 @@ after those land.
   subcommands, what scope, how failure is distinguished from "no such credential") is not
   pinned by any source read for this story; AC-13.1 now requires the implementer to name
   the exact discovery chain and its fallback behavior in the PR that lands it.
-- Phase 2 (automating the Entra provisioning ceremony) has no spike or RFC yet; this story
-  does not open one, it only records the boundary in "Out of scope".
+- Phase 2 (automating the Entra provisioning ceremony) is now chartered as US-0014, which
+  itself needs a spike to pin the least-privilege `az` scope check before implementation;
+  this story only records the boundary in "Out of scope" and does not open the spike itself.
