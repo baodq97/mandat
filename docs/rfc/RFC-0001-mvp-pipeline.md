@@ -59,6 +59,23 @@ scheduler beyond a single in-flight task. Webhook ingestion, Teams notification,
 Jira adapter, Arc identity mode, and the multi-VM runner pool. The dashboard beyond a
 read-only status view.
 
+### Post-acceptance amendment (2026-07-16): single-VM concurrent dispatch
+
+With the walking skeleton delivered and run live end to end (green `in-review` under the
+Reviewer identity, 2026-07-16), the single-in-flight scope line above is relaxed for one
+slice: concurrent dispatch of independent queued tasks on a single VM, bounded by a
+configured runner pool size that defaults to 1 and is bit-compatible with the original
+single-in-flight scope when unset. US-0012 scopes the slice; its acceptance criteria carry
+the red-team-hardened constraints: dispatch integrity (no double-dispatch across poll
+cycles, AC-12.6), a whole-mirror cross-task lock (AC-12.2), per-task runner config isolation
+(`CLAUDE_CONFIG_DIR`/`HOME`, AC-12.7), an aggregate in-flight budget ceiling (AC-12.8), and a
+pool-vs-sequential wall-clock benchmark as the kill criterion (no measured speedup yields to
+multi-VM scale-out, not more single-VM locks). Still out of scope, unchanged: dependency
+waves and conflict groups (spec §4.3's full `max_concurrent` scheduler) and the multi-VM
+runner pool (spec §10, D4's scale-out answer). Provenance: the US-0012 red-team brief finding
+F4 raised whether this relaxation needs an RFC amendment; the owner ruled amend, authorized
+in-session 2026-07-16. Status, owner, and the accepted decisions are unchanged.
+
 ## Definition of done
 
 The skeleton is done when one dispatched ADO work item reaches the `in-review` state
