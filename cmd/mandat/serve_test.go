@@ -363,6 +363,94 @@ func newSkeleton(t *testing.T, scenario string) (serveDeps, *fakeADO, task.TaskC
 	return deps, ado, contracts[0]
 }
 
+// newSkeletonWithReviewerAdapter mirrors newSkeleton but wires the Verifier's
+// probe through a second, real azuredevops.Adapter under Role="reviewer" that
+// calls FindPR against the same fakeADO fixture (AC-27's live wiring), rather
+// than the fakeProbe double newSkeleton injects. The fixture's GET pullrequests
+// answer is scripted via ado.setFindPRResult (defaulting to the PR the fixture's
+// POST pullrequests handler reports, under the Dev agent user), so a test can
+// drive both the happy path and a createdBy mismatch through the real
+// adapter-and-verifier composition.
+func newSkeletonWithReviewerAdapter(t *testing.T, scenario string) (serveDeps, *fakeADO, task.TaskContract) {
+	t.Helper()
+	deps, ado, tc := newSkeleton(t, scenario)
+
+	reviewerAdapter, err := azuredevops.New(azuredevops.Config{
+		BaseURL:          ado.srv.URL,
+		Org:              skeletonOrg,
+		Project:          skeletonProject,
+		Role:             "reviewer",
+		DevAgentUserName: reviewerUser,
+		Tokens:           &fakeTokenProvider{token: "fake-delegated-reviewer-token"},
+		Remits:           &config.Config{},
+	})
+	if err != nil {
+		t.Fatalf("azuredevops.New() reviewer adapter error = %v", err)
+	}
+	deps.Verifier = verify.New(reviewerAdapterProbe{adapter: reviewerAdapter, identity: reviewerUser})
+	return deps, ado, tc
+}
+
+// TestWalkingSkeleton_ReviewerProbe_HappyPath wires the real FindPR probe end to
+// end (RFC-0001 AC-27, US-0007): with a reviewer-role adapter in place of the
+// fakeProbe double, the probe's GET pullrequests call reaches the same
+// recorded-ADO fixture the Dev adapter opened the PR against, under the
+// Reviewer role's own token, and the run still reaches in-review.
+func TestWalkingSkeleton_ReviewerProbe_HappyPath(t *testing.T) {
+	deps, _, tc := newSkeletonWithReviewerAdapter(t, "completed")
+	ctx := context.Background()
+
+	state, err := runTask(ctx, deps, tc)
+	if err != nil {
+		t.Fatalf("runTask() error = %v", err)
+	}
+	if state != orchestrator.StateInReview {
+		t.Fatalf("final state = %q, want %q", state, orchestrator.StateInReview)
+	}
+
+	events, err := deps.Store.Events(ctx, tc.ID)
+	if err != nil {
+		t.Fatalf("Events() error = %v", err)
+	}
+	if pe := findAct(events, actProbePRExists); pe == nil || pe.ActingIdentity != reviewerUser {
+		t.Errorf("probe_pr_exists row = %+v, want acting identity %q", pe, reviewerUser)
+	}
+}
+
+// TestWalkingSkeleton_ReviewerProbe_CreatedByMismatchHolds proves the probe's
+// createdBy check fails closed through the real FindPR path: when the fixture's
+// GET pullrequests reports a createdBy that is not the Dev agent user, the run
+// holds at needs-human via probe_failed even though the runner reported
+// completed and the gate re-run and diff-inside-remit both passed.
+func TestWalkingSkeleton_ReviewerProbe_CreatedByMismatchHolds(t *testing.T) {
+	deps, ado, tc := newSkeletonWithReviewerAdapter(t, "completed")
+	ado.setFindPRResult(true, "someone-else@baotest.onmicrosoft.com")
+	ctx := context.Background()
+
+	state, err := runTask(ctx, deps, tc)
+	if err != nil {
+		t.Fatalf("runTask() error = %v", err)
+	}
+	if state != orchestrator.StateNeedsHuman {
+		t.Fatalf("final state = %q, want %q", state, orchestrator.StateNeedsHuman)
+	}
+
+	events, err := deps.Store.Events(ctx, tc.ID)
+	if err != nil {
+		t.Fatalf("Events() error = %v", err)
+	}
+	pf := findAct(events, string(orchestrator.EventProbeFailed))
+	if pf == nil || pf.ToState != string(orchestrator.StateNeedsHuman) {
+		t.Errorf("probe_failed row = %+v, want to_state needs-human", pf)
+	}
+	if !strings.Contains(string(pf.Detail), "createdBy") {
+		t.Errorf("probe_failed detail = %s, want it to name the createdBy mismatch", pf.Detail)
+	}
+	if findAct(events, actProbePRExists) != nil {
+		t.Error("probe_pr_exists was journaled for a createdBy mismatch")
+	}
+}
+
 func openStore(t *testing.T) *journal.Store {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "mandat.db")
@@ -414,11 +502,19 @@ type fakeADO struct {
 	statuses          []string
 	comments          []string
 	failTrackerWrites bool
+	findPRExists      bool
+	findPRCreatedBy   string
 }
 
 func newFakeADO(t *testing.T) *fakeADO {
 	t.Helper()
-	f := &fakeADO{}
+	f := &fakeADO{
+		// Defaults match the happy path: the PR the fixture's POST pullrequests
+		// handler reports as opened, under the same Dev agent user, so a test that
+		// wires the real reviewer probe without scripting a mismatch still finds it.
+		findPRExists:    true,
+		findPRCreatedBy: devUser,
+	}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.handle))
 	t.Cleanup(f.srv.Close)
 	return f
@@ -439,6 +535,16 @@ func (f *fakeADO) handle(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(pullRequest7Body))
+	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pullrequests"):
+		f.mu.Lock()
+		exists, createdBy := f.findPRExists, f.findPRCreatedBy
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if !exists {
+			_, _ = w.Write([]byte(`{"count":0,"value":[]}`))
+			return
+		}
+		fmt.Fprintf(w, `{"count":1,"value":[{"pullRequestId":7,"createdBy":{"uniqueName":%q}}]}`, createdBy)
 	case r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/_apis/wit/workitems/42"):
 		body, _ := io.ReadAll(r.Body)
 		f.mu.Lock()
@@ -493,6 +599,16 @@ func (f *fakeADO) setFailTrackerWrites(fail bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.failTrackerWrites = fail
+}
+
+// setFindPRResult scripts the GET pullrequests fixture's answer, so a test can
+// drive the real FindPR probe path to either a found PR (with a chosen
+// createdBy) or an empty result.
+func (f *fakeADO) setFindPRResult(exists bool, createdBy string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.findPRExists = exists
+	f.findPRCreatedBy = createdBy
 }
 
 // fakeTokenProvider is the injected identity seam: a fixed token, no live mint, so

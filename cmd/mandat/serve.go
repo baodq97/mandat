@@ -17,6 +17,7 @@ import (
 	"github.com/baodq97/mandat/internal/adapter/azuredevops"
 	"github.com/baodq97/mandat/internal/buildinfo"
 	"github.com/baodq97/mandat/internal/config"
+	"github.com/baodq97/mandat/internal/identity"
 	"github.com/baodq97/mandat/internal/journal"
 	"github.com/baodq97/mandat/internal/orchestrator"
 	"github.com/baodq97/mandat/internal/role"
@@ -497,13 +498,17 @@ func buildServeDeps(cfg *config.Config, store *journal.Store, roleName string, m
 	}
 
 	reviewer := reviewerIdentity(cfg)
+	probe, err := buildReviewerProbe(cfg, broker, reviewer)
+	if err != nil {
+		return serveDeps{}, err
+	}
 
 	return serveDeps{
 		Store:               store,
 		Tracker:             adapter,
 		Forge:               adapter,
 		Runner:              runner.New(store, selectSpawner(), runner.Config{ClaudePath: "claude", MaxBudgetUSD: maxBudget}),
-		Verifier:            verify.New(reviewerProbe{identity: reviewer}),
+		Verifier:            verify.New(probe),
 		Provision:           workspace.Provision,
 		Role:                r,
 		ReviewerIdentity:    reviewer,
@@ -551,27 +556,73 @@ func gatesResolver(cfg *config.Config) func(string) []string {
 }
 
 // reviewerIdentity resolves the Reviewer agent-user principal the ground-truth PR
-// probe acts as (writer != scorer, RFC-0001 §4.1). The Reviewer identity is
-// provisioned even though its LLM playbook is deferred (PRD §Scope), so the skeleton
-// reads it from a `reviewer` role entry when present.
+// probe acts as (writer != scorer, RFC-0001 §4.1). verify.Verify compares this
+// against TaskContract.AssignedTo, which is the UPN ADO stores (not the Entra
+// object id), so this reads AgentUserName, not AgentUserID. The Reviewer identity
+// is provisioned even though its LLM playbook is deferred (PRD §Scope), so the
+// skeleton reads it from a `reviewer` role entry when present.
 func reviewerIdentity(cfg *config.Config) string {
 	if rc, ok := cfg.Roles["reviewer"]; ok {
-		return rc.AgentUserID
+		return rc.AgentUserName
 	}
 	return ""
 }
 
-// reviewerProbe is the Reviewer-identity PR-existence probe seam. A working FindPR
-// against ADO under the Reviewer agent user belongs in the tracker adapter (outside
-// this story's remit); until it lands, serve() wires this stub so the pipeline
-// composes and the §9 walking-skeleton test injects a fake in its place. FindPR
-// errors rather than certifying, which holds the live path at needs-human by design.
-type reviewerProbe struct {
+// buildReviewerProbe wires the Reviewer-identity PR-existence probe (RFC-0001
+// AC-27). When a `reviewer` role is configured, it builds a second azuredevops
+// Adapter instance under Role="reviewer" (same broker, base URL, org, and
+// project as the Dev adapter) so FindPR mints Reviewer tokens, a principal
+// distinct from the Dev agent user that opened the PR — the probe's own role
+// is what makes writer != scorer an IAM property rather than a convention.
+// Absent a `reviewer` role entry, it falls back to the stub that always errors,
+// so a live run holds at needs-human rather than certifying an unprobed PR.
+func buildReviewerProbe(cfg *config.Config, broker *identity.Broker, reviewerIdentity string) (verify.PRProbe, error) {
+	rc, ok := cfg.Roles["reviewer"]
+	if !ok {
+		return reviewerProbeStub{identity: reviewerIdentity}, nil
+	}
+	adapter, err := azuredevops.New(azuredevops.Config{
+		BaseURL:          adoBaseURL,
+		Org:              cfg.Tracker.Org,
+		Project:          cfg.Tracker.Project,
+		Role:             "reviewer",
+		DevAgentUserName: rc.AgentUserName,
+		Tokens:           broker,
+		Remits:           cfg,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("serve: build reviewer adapter: %w", err)
+	}
+	return reviewerAdapterProbe{adapter: adapter, identity: reviewerIdentity}, nil
+}
+
+// reviewerAdapterProbe adapts *azuredevops.Adapter.FindPR to verify.PRProbe,
+// mapping the adapter-local PRFinding into verify.PRInfo at this composition
+// root — the adapter itself never imports internal/verify.
+type reviewerAdapterProbe struct {
+	adapter  *azuredevops.Adapter
 	identity string
 }
 
-func (p reviewerProbe) Identity() string { return p.identity }
+func (p reviewerAdapterProbe) Identity() string { return p.identity }
 
-func (p reviewerProbe) FindPR(_ context.Context, _ verify.PRRef) (verify.PRInfo, error) {
-	return verify.PRInfo{}, errors.New("serve: reviewer-identity PR probe is not wired yet (needs an ADO FindPR under the reviewer agent user)")
+func (p reviewerAdapterProbe) FindPR(ctx context.Context, ref verify.PRRef) (verify.PRInfo, error) {
+	finding, err := p.adapter.FindPR(ctx, ref.Repo, ref.Branch)
+	if err != nil {
+		return verify.PRInfo{}, err
+	}
+	return verify.PRInfo{Exists: finding.Exists, CreatedBy: finding.CreatedBy, URL: finding.URL}, nil
+}
+
+// reviewerProbeStub is the Reviewer-identity PR-existence probe seam used when
+// no `reviewer` role is configured. FindPR errors rather than certifying, which
+// holds the live path at needs-human by design.
+type reviewerProbeStub struct {
+	identity string
+}
+
+func (p reviewerProbeStub) Identity() string { return p.identity }
+
+func (p reviewerProbeStub) FindPR(_ context.Context, _ verify.PRRef) (verify.PRInfo, error) {
+	return verify.PRInfo{}, errors.New("serve: reviewer-identity PR probe is not wired (configure a `reviewer` role entry)")
 }
