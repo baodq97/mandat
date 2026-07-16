@@ -133,3 +133,11 @@ Format: `date | what escaped | where it should have been caught | lesson | encod
   merge base to the base branch is never result_ok) | fix + red-proven
   regression test in v0.5.0; ancestry check = board backlog item; this
   entry rewritten per the corrections rule, wrong hypothesis owned
+- 2026-07-16 | The first in-place upgrade of the always-on era failed with
+  ETXTBSY: install.sh cp'd over the binary the systemd unit was executing,
+  and the VM silently kept running the old version while the script reported
+  the new one | install.sh's copy step - written when serve only ran in
+  foreground sessions | daemonizing a binary changes its upgrade contract:
+  replace by staged rename (atomic, old inode lives until restart), never
+  in-place copy; and restart the unit as part of the upgrade runbook | fix
+  in install.sh (stage + mv -f); this entry

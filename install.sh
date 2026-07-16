@@ -104,9 +104,13 @@ if ! dir_is_writable "$BIN_DIR"; then
 	sudo_cmd="sudo"
 fi
 
+# Stage-and-rename instead of cp: overwriting a RUNNING mandat (the always-on
+# systemd unit) fails with ETXTBSY, while rename() swaps the directory entry
+# atomically and the running process keeps its old inode until restart.
 $sudo_cmd mkdir -p "$BIN_DIR"
-$sudo_cmd cp "${tmp_dir}/${bin_name}" "${BIN_DIR}/mandat"
-$sudo_cmd chmod 0755 "${BIN_DIR}/mandat"
+$sudo_cmd cp "${tmp_dir}/${bin_name}" "${BIN_DIR}/.mandat.new"
+$sudo_cmd chmod 0755 "${BIN_DIR}/.mandat.new"
+$sudo_cmd mv -f "${BIN_DIR}/.mandat.new" "${BIN_DIR}/mandat"
 
 echo "install.sh: installed to ${BIN_DIR}/mandat"
 "${BIN_DIR}/mandat" version
