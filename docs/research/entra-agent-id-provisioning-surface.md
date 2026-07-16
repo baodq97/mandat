@@ -57,12 +57,29 @@ What stays manual/privileged after the ladder: granting the blueprint's app perm
 entitlements. "Global Administrator required" collapses to: one Agent ID role + two consent
 actions + ADO admin.
 
-## Open questions for the spike (pin before implementation)
+## Spike round 1 (2026-07-16, run on the dogfood tenant): the az scope question, answered halfway
 
-- Which Graph delegated scopes Azure CLI's first-party client can actually carry for the
-  Agent ID endpoints (`AgentIdentityBlueprint.Create`, `AgentIdentity.Create.All`) — the
-  dogfood proved the calls work under az tokens for a privileged operator; the least-priv
-  path needs an explicit scope check.
+Probe: decode the `scp` claim of an az-minted Graph token (Azure CLI first-party client,
+appId `04b07795-8ddb-461a-bbee-02f9e1bf7b46`), then hit the v1.0 registry read endpoint.
+
+- az carries **no Agent-ID-specific scope**. Its `scp`: `Application.ReadWrite.All,
+  AppRoleAssignment.ReadWrite.All, AuditLog.Read.All, DelegatedPermissionGrant.ReadWrite.All,
+  Directory.AccessAsUser.All, Group.ReadWrite.All, User.Read.All, User.ReadWrite.All` (+ OIDC).
+- The dogfood ceremony therefore worked through `Directory.AccessAsUser.All` — effective
+  rights equal the signed-in operator's directory roles. Empirical success is proven only
+  for a privileged operator on the then-beta surface.
+- `GET /v1.0/applications/microsoft.graph.agentIdentityBlueprint` under the az token returns
+  200 and lists the dogfood blueprint — the v1.0 **read** surface works via az today.
+- `DelegatedPermissionGrant.ReadWrite.All` is present — the ADO `oauth2PermissionGrants`
+  step (6) is callable through az when the operator holds admin rights.
+
+Still open, narrowed: whether the v1.0 Agent ID **write** endpoints authorize an operator
+holding only the Agent ID Developer role through `Directory.AccessAsUser.All`, or demand the
+named `AgentIdentity*` scopes az cannot request. Needs a minimal-role test user. US-0014's
+ensure steps must therefore catch a 403 and print the Entra PowerShell alternative
+(`Connect-Entra -Scopes` with the exact scope names) instead of failing opaquely.
+
+## Open questions for the spike (pin before implementation)
 - Whether agent-user UPN domain selection (verified domains of the tenant) needs a picker.
 - Propagation lag handling (entitlement right after user creation failed once in the
   dogfood; retry policy belongs in the ensure step).
