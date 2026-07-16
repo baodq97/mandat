@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -107,15 +108,37 @@ type serveDeps struct {
 	Gates     func(repo string) []string
 	MirrorDir func(repo string) string
 
-	TasksRoot           string
-	RoleUser            string
-	Home                string
-	ConfigDir           string
+	TasksRoot string
+	RoleUser  string
+
+	// Home and ConfigDir are the shared per-role OS-isolation dirs (US-0005).
+	// runTask no longer spawns against these directly: dispatchCycle's worker
+	// pool can run several tasks for this role at once, so runRequest derives a
+	// fresh per-task pair instead (perTaskDirs, US-0012 AC-12.7). These stay for
+	// whatever non-concurrent per-role work needs them (e.g. doctor).
+	Home      string
+	ConfigDir string
+
 	GitCredentialHelper string
 	DenyToolHookCommand string
 
 	HarnessVersion string
 	ConfigVersion  string
+
+	// StateRoot is the root perTaskDirs derives each spawn's per-task HOME and
+	// CLAUDE_CONFIG_DIR under (US-0012 AC-12.7); mandatStateRoot in production, a
+	// temp dir in tests.
+	StateRoot string
+
+	// PoolSize bounds how many contracts dispatchCycle runs concurrently in one
+	// poll cycle (cfg.Runner.PoolSize, US-0012 AC-12.1/AC-12.6).
+	PoolSize int
+
+	// MaxUSDPerRun and MaxUSDInFlight mirror cfg.Budget: the per-run cost ceiling
+	// and the aggregate in-flight ceiling dispatchCycle's admission gate enforces
+	// before launching a task (US-0012 AC-12.8).
+	MaxUSDPerRun   float64
+	MaxUSDInFlight float64
 }
 
 // runTask drives one TaskContract through the skeleton pipeline and returns the
@@ -280,22 +303,39 @@ func (d serveDeps) provision(ctx context.Context, tc *task.TaskContract) (*works
 	})
 }
 
-// runRequest builds the runner request from the resolved role and the per-role OS
-// isolation the composition supplies (config carries no OS-user field, so the runner
-// is told them, ADR-0006 §Isolation).
+// runRequest builds the runner request from the resolved role and the per-task OS
+// isolation the composition derives fresh for this run (config carries no OS-user
+// field, so the runner is told them, ADR-0006 §Isolation). Home and ConfigDir come
+// from perTaskDirs, not the shared d.Home/d.ConfigDir: dispatchCycle's worker pool
+// can have several of this role's tasks in flight at once, and each spawned
+// claude child needs its own HOME and CLAUDE_CONFIG_DIR so concurrent siblings
+// never collide on the same session store (US-0012 AC-12.7).
 func (d serveDeps) runRequest(tc *task.TaskContract, ws *workspace.Workspace) runner.Request {
+	home, configDir := perTaskDirs(d.StateRoot, d.Role.Name, tc.ID)
 	return runner.Request{
 		Task:                tc,
 		Role:                d.Role,
 		Worktree:            ws,
 		RoleUser:            d.RoleUser,
-		Home:                d.Home,
-		ConfigDir:           d.ConfigDir,
+		Home:                home,
+		ConfigDir:           configDir,
 		GitCredentialHelper: d.GitCredentialHelper,
 		DenyToolHookCommand: d.DenyToolHookCommand,
 		HarnessVersion:      d.HarnessVersion,
 		ConfigVersion:       d.ConfigVersion,
 	}
+}
+
+// perTaskDirs derives the per-task HOME and CLAUDE_CONFIG_DIR a spawned claude
+// child gets, under <stateRoot>/roles/<role>/tasks/<taskID>/ rather than the
+// shared per-role dirs (US-0012 AC-12.7). A fresh, empty CLAUDE_CONFIG_DIR is
+// correct here and needs no seeding from the per-role one: Claude Code auth
+// reaches the child through the allow-listed CLAUDE_CODE_OAUTH_TOKEN /
+// ANTHROPIC_API_KEY env vars (runner's buildEnv), never through anything already
+// on disk in the config dir.
+func perTaskDirs(stateRoot, roleName, taskID string) (home, configDir string) {
+	base := filepath.Join(stateRoot, "roles", roleName, "tasks", taskID)
+	return filepath.Join(base, "home"), filepath.Join(base, "claude-config")
 }
 
 // transition advances the orchestrator, persists the task's new state, and journals
@@ -463,26 +503,79 @@ func serve(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
-// dispatchCycle polls once and runs every not-yet-dispatched contract. Re-polling an
-// already-dispatched work item is idempotent on the stable tracker-derived id
-// (RFC-0001 AC-03): the task is already in the store, so it is skipped.
+// dispatchCycle polls once and runs every not-yet-dispatched contract through a
+// worker pool bounded by dispatchLimit (US-0012 batch 2, AC-12.1). It BLOCKS until
+// every task it launches this cycle finishes before returning (drain-per-cycle,
+// AC-12.6): the loop launches a goroutine for every pending contract and wg.Wait
+// awaits them all, so a polled contract is never left unstarted for the next cycle
+// to redispatch. Re-polling an already-dispatched work item stays idempotent on the
+// stable tracker-derived id exactly as before, since runTask upserts the task on its
+// first step (RFC-0001 AC-03). pool_size 1 gives a semaphore of one, reproducing the
+// pre-batch-2 sequential behavior byte for byte. One task's error is isolated to
+// that task (AC-12.5): each goroutine reports its own error on stderr under outMu and
+// never aborts a sibling in flight or one still waiting on a pool slot.
 func dispatchCycle(ctx context.Context, d serveDeps, stdout, stderr io.Writer) {
 	contracts, err := d.Tracker.Poll(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "mandat serve: poll: %v\n", err)
 		return
 	}
+
+	var pending []task.TaskContract
 	for _, tc := range contracts {
 		if _, err := d.Store.LoadTask(ctx, tc.ID); err == nil {
 			continue
 		}
-		state, err := runTask(ctx, d, tc)
-		if err != nil {
-			fmt.Fprintf(stderr, "mandat serve: task %s: %v\n", tc.ID, err)
-			continue
-		}
-		fmt.Fprintf(stdout, "mandat serve: task %s reached %s\n", tc.ID, state)
+		pending = append(pending, tc)
 	}
+
+	sem := make(chan struct{}, dispatchLimit(d.PoolSize, d.MaxUSDPerRun, d.MaxUSDInFlight))
+	var wg sync.WaitGroup
+	var outMu sync.Mutex
+	for _, tc := range pending {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(tc task.TaskContract) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			state, err := runTask(ctx, d, tc)
+
+			outMu.Lock()
+			defer outMu.Unlock()
+			if err != nil {
+				fmt.Fprintf(stderr, "mandat serve: task %s: %v\n", tc.ID, err)
+				return
+			}
+			fmt.Fprintf(stdout, "mandat serve: task %s reached %s\n", tc.ID, state)
+		}(tc)
+	}
+	wg.Wait()
+}
+
+// dispatchLimit is the number of tasks dispatchCycle runs at once: the worker-pool
+// bound cfg.Runner.PoolSize, capped by aggregate budget admission (US-0012
+// AC-12.6/AC-12.8). Because max_usd_per_run is a fixed per-task reservation, the
+// admission bound "(running+1) * max_usd_per_run must never exceed the ceiling" is a
+// constant — the largest N with N * max_usd_per_run <= ceiling, i.e.
+// floor(ceiling / max_usd_per_run) — so a single semaphore of that size enforces it
+// with no per-task cost accounting. The effective ceiling is budget.max_usd_in_flight
+// when set, else the derive rule pool_size * max_usd_per_run; the derived case caps at
+// exactly pool_size, so it never throttles below the pool and is applied by leaving
+// the limit at pool_size rather than dividing (which would round a derived ceiling
+// down under float error). Only an explicit, tighter max_usd_in_flight reduces
+// parallelism below pool_size. pool_size 1 yields 1: today's sequential dispatch.
+func dispatchLimit(poolSize int, maxUSDPerRun, maxUSDInFlight float64) int {
+	limit := poolSize
+	if maxUSDInFlight > 0 && maxUSDPerRun > 0 {
+		if budget := int(maxUSDInFlight / maxUSDPerRun); budget < limit {
+			limit = budget
+		}
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	return limit
 }
 
 // newRoleAdapter builds the azuredevops Adapter for role, scoped to the
@@ -559,6 +652,10 @@ func buildServeDeps(cfg *config.Config, store *journal.Store, roleName string, m
 		RoleUser:            "mandat-" + roleName,
 		Home:                filepath.Join(mandatStateRoot, "roles", roleName, "home"),
 		ConfigDir:           filepath.Join(mandatStateRoot, "roles", roleName, "claude-config"),
+		StateRoot:           mandatStateRoot,
+		PoolSize:            cfg.Runner.PoolSize,
+		MaxUSDPerRun:        cfg.Budget.MaxUSDPerRun,
+		MaxUSDInFlight:      cfg.Budget.MaxUSDInFlight,
 		GitCredentialHelper: "!" + self + " git-credential --role " + roleName,
 		DenyToolHookCommand: self + ` remit-guard --worktree "$CLAUDE_PROJECT_DIR"`,
 		HarnessVersion:      buildinfo.Version(),
