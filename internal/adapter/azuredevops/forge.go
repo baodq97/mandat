@@ -33,7 +33,9 @@ type CreatePRInput struct {
 // author's UPN: opened under the delegated agent-user token, a PR is authored by
 // the Dev agent user as a directory fact (spike S3), the value the verification
 // plane's ground-truth probe checks against (probe_failed if it is not the Dev
-// agent user, RFC-0001 state machine).
+// agent user, RFC-0001 state machine). URL is the human web URL
+// (base/org/project/_git/{repo}/pullrequest/{id}) built by pullRequestURL, not
+// the API self-link the response's own url field carries.
 type CreatePRResult struct {
 	ID        int
 	URL       string
@@ -69,7 +71,7 @@ func (a *Adapter) CreatePR(ctx context.Context, in CreatePRInput) (CreatePRResul
 	}
 	return CreatePRResult{
 		ID:        resp.PullRequestID,
-		URL:       resp.URL,
+		URL:       a.pullRequestURL(in.Repo, resp.PullRequestID),
 		CreatedBy: resp.CreatedBy.UniqueName,
 	}, nil
 }
@@ -186,6 +188,5 @@ type workItemRef struct {
 // reusing the adoIdentity shape the work-item read already decodes.
 type createPRResponse struct {
 	PullRequestID int         `json:"pullRequestId"`
-	URL           string      `json:"url"`
 	CreatedBy     adoIdentity `json:"createdBy"`
 }

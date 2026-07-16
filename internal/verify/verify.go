@@ -164,6 +164,13 @@ type Verdict struct {
 	// verdict after it (a later probe failure, or result_ok) — but stays empty on
 	// remit_violation, since the diff-inside-remit check now runs before the
 	// gates and short-circuits before they start.
+	//
+	// Gates also carries whatever results were collected when Verify returns a
+	// non-nil operational error (AC-25): non-empty when the error surfaces after
+	// the gate re-run started (e.g. the probe's transport fails once gates are
+	// green), empty when the failure precedes it (e.g. a diff-check transport
+	// error). The caller journals these partial results so gates that DID run are
+	// never dropped just because a later check errored.
 	Gates []GateResult
 
 	// PR is the probe's finding, populated once the probe ran (gates green and
@@ -194,6 +201,11 @@ func New(probe PRProbe) *Verifier {
 // as the agent left it, so gate side effects (e.g., a test run's __pycache__)
 // exist only after the diff has already been read and can never register as an
 // out-of-remit escape.
+//
+// On an operational error, the returned Verdict is not the zero value: it
+// carries whatever Gates results the gate re-run had already collected (AC-25),
+// so a later transport error (e.g. the PR probe) never drops gates that DID run.
+// See Verdict.Gates.
 func (v *Verifier) Verify(ctx context.Context, req Request) (Verdict, error) {
 	if err := req.validate(); err != nil {
 		return Verdict{}, err
@@ -223,7 +235,7 @@ func (v *Verifier) Verify(ctx context.Context, req Request) (Verdict, error) {
 
 	gates, event, detail, err := v.rerunGates(ctx, req)
 	if err != nil {
-		return Verdict{}, err
+		return Verdict{Gates: gates}, err
 	}
 	if event != "" {
 		return Verdict{Event: event, Failed: CheckGate, Detail: detail, Gates: gates}, nil
@@ -231,7 +243,7 @@ func (v *Verifier) Verify(ctx context.Context, req Request) (Verdict, error) {
 
 	info, err := v.probe.FindPR(ctx, PRRef{Repo: req.Task.Remit.Repo, Branch: req.Branch})
 	if err != nil {
-		return Verdict{}, fmt.Errorf("verify: pr probe: %w", err)
+		return Verdict{Gates: gates}, fmt.Errorf("verify: pr probe: %w", err)
 	}
 	switch {
 	case !info.Exists:
