@@ -152,7 +152,12 @@ func trackerCheckFor(cfg *config.Config, roleName string) func(context.Context) 
 			return checkResult{name: name, required: true, detail: "resolve role: " + rerr.Error()}
 		}
 	}
-	broker := buildBroker(cfg)
+	broker, berr := buildBroker(cfg)
+	if berr != nil {
+		return func(context.Context) checkResult {
+			return checkResult{name: name, required: true, detail: "build broker: " + berr.Error()}
+		}
+	}
 	adapter, aerr := azuredevops.New(azuredevops.Config{
 		BaseURL:          adoBaseURL,
 		Org:              cfg.Tracker.Org,

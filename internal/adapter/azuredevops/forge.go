@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 )
 
 // refHeadsPrefix qualifies a bare branch name into the git ref namespace. ADO's
@@ -75,6 +76,72 @@ func (a *Adapter) CreatePR(ctx context.Context, in CreatePRInput) (CreatePRResul
 		URL:       resp.URL,
 		CreatedBy: resp.CreatedBy.UniqueName,
 	}, nil
+}
+
+// PRFinding is the adapter-local result of the PR-existence probe (RFC-0001
+// AC-27). It stays local to this package rather than internal/verify's PRInfo
+// so the adapter never imports internal/verify; the caller at cmd wiring maps
+// it into verify.PRInfo. Exists is false with a nil error when no PR matches
+// the source branch. CreatedBy is the PR author's UPN, and URL is the human
+// web URL (base/org/project/_git/{repo}/pullrequest/{id}), not the API
+// self-link CreatePRResult.URL carries.
+type PRFinding struct {
+	Exists    bool
+	CreatedBy string
+	URL       string
+}
+
+// FindPR looks up the active pull request open from branch in repo, authorized
+// through the adapter's own role — a reviewer-role Adapter instance mints
+// Reviewer tokens, so the call is the out-of-band probe a distinct principal
+// from the Dev agent user makes (writer != scorer, RFC-0001 §4.1). The search
+// is restricted to status=active rather than "all": the run's own draft PR is
+// always active in this slice, and ADO documents no ordering on the list
+// response, so a same-branch re-run whose earlier PR was abandoned could have
+// that dead PR sort first and get false-certified as existing under an
+// unfiltered search. When more than one active PR matches, the tie-break picks
+// the highest pullRequestId (the newest) deterministically rather than
+// trusting response order.
+func (a *Adapter) FindPR(ctx context.Context, repo, branch string) (PRFinding, error) {
+	u := a.base.JoinPath(a.org, a.project, "_apis", "git", "repositories", repo, "pullrequests")
+	q := u.Query()
+	q.Set("searchCriteria.sourceRefName", refHeadsPrefix+branch)
+	q.Set("searchCriteria.status", "active")
+	q.Set("api-version", apiVersion)
+	u.RawQuery = q.Encode()
+
+	var resp findPRResponse
+	if err := a.do(ctx, http.MethodGet, u.String(), "", nil, &resp); err != nil {
+		return PRFinding{}, fmt.Errorf("azuredevops: find pull request for repo %s branch %s: %w", repo, branch, err)
+	}
+	if len(resp.Value) == 0 {
+		return PRFinding{}, nil
+	}
+	pr := resp.Value[0]
+	for _, candidate := range resp.Value[1:] {
+		if candidate.PullRequestID > pr.PullRequestID {
+			pr = candidate
+		}
+	}
+	return PRFinding{
+		Exists:    true,
+		CreatedBy: pr.CreatedBy.UniqueName,
+		URL:       a.pullRequestURL(repo, pr.PullRequestID),
+	}, nil
+}
+
+// pullRequestURL is the human web URL a browser opens for a pull request,
+// distinct from the API self-link the list response's own `url` field carries
+// (mirrors workItemURL's same distinction for work items).
+func (a *Adapter) pullRequestURL(repo string, id int) string {
+	return a.base.JoinPath(a.org, a.project, "_git", repo, "pullrequest", strconv.Itoa(id)).String()
+}
+
+// findPRResponse is the pullrequests list envelope; each entry reuses
+// createPRResponse's shape since the list and create responses carry the same
+// pull-request fields.
+type findPRResponse struct {
+	Value []createPRResponse `json:"value"`
 }
 
 // APIError is the typed error do() returns on a non-2xx ADO response. It carries

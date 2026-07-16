@@ -61,10 +61,10 @@ func TestGitCredential_UnknownOpFails(t *testing.T) {
 }
 
 // TestResolveClientSecret proves the pilot fallback chain (env, then the
-// MANDAT_CLIENT_SECRET_FILE path, trimmed) and that a missing file yields empty
-// rather than an error — the mint failure surfaces later as a clear Entra error,
-// not here. Subtests use t.Setenv, so no t.Parallel here (Go forbids Setenv under
-// a parallel ancestor).
+// MANDAT_CLIENT_SECRET_FILE path, trimmed) and that a read failure or an unset
+// pair surfaces as an error naming the cause, rather than an empty secret that
+// only fails later as an opaque Entra error. Subtests use t.Setenv, so no
+// t.Parallel here (Go forbids Setenv under a parallel ancestor).
 func TestResolveClientSecret(t *testing.T) {
 	t.Run("env wins even when a file is also set", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "secret")
@@ -73,7 +73,11 @@ func TestResolveClientSecret(t *testing.T) {
 		}
 		t.Setenv("MANDAT_CLIENT_SECRET", "s1")
 		t.Setenv("MANDAT_CLIENT_SECRET_FILE", path)
-		if got := resolveClientSecret(); got != "s1" {
+		got, err := resolveClientSecret()
+		if err != nil {
+			t.Fatalf("resolveClientSecret() error = %v, want nil", err)
+		}
+		if got != "s1" {
 			t.Errorf("resolveClientSecret() = %q, want %q", got, "s1")
 		}
 	})
@@ -85,24 +89,62 @@ func TestResolveClientSecret(t *testing.T) {
 		}
 		t.Setenv("MANDAT_CLIENT_SECRET", "")
 		t.Setenv("MANDAT_CLIENT_SECRET_FILE", path)
-		if got := resolveClientSecret(); got != "s2" {
+		got, err := resolveClientSecret()
+		if err != nil {
+			t.Fatalf("resolveClientSecret() error = %v, want nil", err)
+		}
+		if got != "s2" {
 			t.Errorf("resolveClientSecret() = %q, want %q", got, "s2")
 		}
 	})
 
-	t.Run("nonexistent file path yields empty, not error", func(t *testing.T) {
+	t.Run("empty-but-readable file errors naming the path", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "secret")
+		if err := os.WriteFile(path, []byte("   \n"), 0o600); err != nil {
+			t.Fatalf("WriteFile() error = %v", err)
+		}
 		t.Setenv("MANDAT_CLIENT_SECRET", "")
-		t.Setenv("MANDAT_CLIENT_SECRET_FILE", filepath.Join(t.TempDir(), "missing"))
-		if got := resolveClientSecret(); got != "" {
-			t.Errorf("resolveClientSecret() = %q, want empty", got)
+		t.Setenv("MANDAT_CLIENT_SECRET_FILE", path)
+		got, err := resolveClientSecret()
+		if err == nil {
+			t.Fatalf("resolveClientSecret() error = nil, want an error naming %q (a blank file must not silently mint an empty secret)", path)
+		}
+		if got != "" {
+			t.Errorf("resolveClientSecret() = %q, want empty on error", got)
+		}
+		if !strings.Contains(err.Error(), path) {
+			t.Errorf("resolveClientSecret() error = %q, want it to name %q", err.Error(), path)
 		}
 	})
 
-	t.Run("both unset yields empty", func(t *testing.T) {
+	t.Run("nonexistent file path errors naming the path", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "missing")
+		t.Setenv("MANDAT_CLIENT_SECRET", "")
+		t.Setenv("MANDAT_CLIENT_SECRET_FILE", path)
+		got, err := resolveClientSecret()
+		if err == nil {
+			t.Fatalf("resolveClientSecret() error = nil, want an error naming %q", path)
+		}
+		if got != "" {
+			t.Errorf("resolveClientSecret() = %q, want empty on error", got)
+		}
+		if !strings.Contains(err.Error(), path) {
+			t.Errorf("resolveClientSecret() error = %q, want it to name %q", err.Error(), path)
+		}
+	})
+
+	t.Run("both unset errors naming both variables", func(t *testing.T) {
 		t.Setenv("MANDAT_CLIENT_SECRET", "")
 		t.Setenv("MANDAT_CLIENT_SECRET_FILE", "")
-		if got := resolveClientSecret(); got != "" {
-			t.Errorf("resolveClientSecret() = %q, want empty", got)
+		got, err := resolveClientSecret()
+		if err == nil {
+			t.Fatalf("resolveClientSecret() error = nil, want an error naming both env vars")
+		}
+		if got != "" {
+			t.Errorf("resolveClientSecret() = %q, want empty on error", got)
+		}
+		if !strings.Contains(err.Error(), "MANDAT_CLIENT_SECRET") || !strings.Contains(err.Error(), "MANDAT_CLIENT_SECRET_FILE") {
+			t.Errorf("resolveClientSecret() error = %q, want it to name both MANDAT_CLIENT_SECRET and MANDAT_CLIENT_SECRET_FILE", err.Error())
 		}
 	})
 }
