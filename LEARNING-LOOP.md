@@ -141,3 +141,19 @@ Format: `date | what escaped | where it should have been caught | lesson | encod
   replace by staged rename (atomic, old inode lives until restart), never
   in-place copy; and restart the unit as part of the upgrade runbook | fix
   in install.sh (stage + mv -f); this entry
+- 2026-07-16 | The ten chartering US (US-0001..0010) sat at open|TBD through
+  24 PRs and ten releases while every plane they chartered shipped, and one
+  AC (US-0008 8.2, the MCP tracker wiring) silently diverged from what was
+  actually built; the owner's direct question was the only detector. The
+  contrast is damning: US-0011/0012, driven as governance dogfood, got eight
+  lifecycle commits (draft, owner, red-team folds, in-progress, done) while
+  US-0001..0010 got exactly two - birth and today's bulk accept | the arc's
+  definition-of-done: code done-ness had gates, reviewers, and a release
+  train; doc done-ness had no trigger surface at all (govkit verify is
+  structural, the doc-keeper agent exists but nothing invokes it, the
+  promote/release ritual never asks which US it completed) | a release is
+  not done until the docs it satisfies are reconciled: every promote ends
+  with a doc-keeper pass (which US do these changes complete? propose flips
+  or corrections with evidence); an AC nothing implements is drift to
+  surface, not silence | this entry; harness fix pending owner's pick
+  (release-ritual doc-keeper step vs a govkit staleness report)
