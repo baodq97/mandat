@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -144,6 +145,23 @@ func TestWalkingSkeleton_HappyPath(t *testing.T) {
 	if run.TotalCostUSD <= 0 || !strings.Contains(string(run.Usage), "input_tokens") {
 		t.Errorf("run cost/usage = %v / %s, want the stream's telemetry", run.TotalCostUSD, run.Usage)
 	}
+
+	// Tracker lifecycle feedback (US-0018): the work item moved to the configured
+	// in-progress state before the runner spawned, and the source work item got a
+	// dispatch comment naming the task and role plus a comment carrying the PR URL.
+	if statuses := ado.statusCalls(); len(statuses) != 1 || !strings.Contains(statuses[0], "Doing") {
+		t.Errorf("ApplyStatus calls = %v, want exactly one call setting %q", statuses, "Doing")
+	}
+	comments := ado.commentCalls()
+	if len(comments) != 2 {
+		t.Fatalf("Comment calls = %v, want 2 (dispatch + PR opened)", comments)
+	}
+	if !strings.Contains(comments[0], tc.ID) || !strings.Contains(comments[0], "dev") {
+		t.Errorf("dispatch comment = %q, want it to name task %s and role %q", comments[0], tc.ID, "dev")
+	}
+	if !strings.Contains(comments[1], "pullRequests/7") {
+		t.Errorf("PR comment = %q, want it to carry the created PR's URL", comments[1])
+	}
 }
 
 // TestWalkingSkeleton_NeedsHumanHold is the deterministic-edge variant: the fake
@@ -190,6 +208,16 @@ func TestWalkingSkeleton_NeedsHumanHold(t *testing.T) {
 	}
 	if len(results) != 1 || results[0].Valid || len(results[0].Raw) != 0 {
 		t.Errorf("results = %+v, want one row with valid=0 and empty raw", results)
+	}
+
+	// Tracker lifecycle feedback still ran (dispatch), and the hold posts a
+	// comment naming the reason since the run produced no ResultContract (US-0018).
+	comments := ado.commentCalls()
+	if len(comments) != 2 {
+		t.Fatalf("Comment calls = %v, want 2 (dispatch + needs-human hold)", comments)
+	}
+	if !strings.Contains(comments[1], "held task") || !strings.Contains(comments[1], "ResultContract") {
+		t.Errorf("hold comment = %q, want it to name the held task and the runner reason", comments[1])
 	}
 }
 
@@ -268,6 +296,7 @@ func newSkeleton(t *testing.T, scenario string) (serveDeps, *fakeADO, task.TaskC
 		Provision:        workspace.Provision,
 		Role:             devRole,
 		ReviewerIdentity: reviewerUser,
+		InProgressState:  "Doing",
 		RepoURL:          func(repo string) (string, error) { return registry.Repos[repo].URL, nil },
 		Gates:            func(repo string) []string { return registry.Repos[repo].Gates },
 		MirrorDir:        func(string) string { return mirror },
@@ -329,11 +358,15 @@ func runIDFromEvents(events []journal.JournalEvent) string {
 
 // fakeADO is the recorded-ADO double: it replays canned WIQL, work-item, and draft-PR
 // responses so no test dials dev.azure.com, and records whether a PR POST arrived so
-// the needs-human variant can prove the pipeline never advanced.
+// the needs-human variant can prove the pipeline never advanced. It also records
+// every ApplyStatus and Comment call so the tracker-feedback tests (US-0018) can
+// assert on the writes serve makes back onto the source work item.
 type fakeADO struct {
-	srv *httptest.Server
-	mu  sync.Mutex
-	pr  bool
+	srv      *httptest.Server
+	mu       sync.Mutex
+	pr       bool
+	statuses []string
+	comments []string
 }
 
 func newFakeADO(t *testing.T) *fakeADO {
@@ -359,6 +392,20 @@ func (f *fakeADO) handle(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(pullRequest7Body))
+	case r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/_apis/wit/workitems/42"):
+		body, _ := io.ReadAll(r.Body)
+		f.mu.Lock()
+		f.statuses = append(f.statuses, string(body))
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/workitems/42/comments"):
+		body, _ := io.ReadAll(r.Body)
+		f.mu.Lock()
+		f.comments = append(f.comments, string(body))
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
 	default:
 		http.NotFound(w, r)
 	}
@@ -368,6 +415,18 @@ func (f *fakeADO) prCreated() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.pr
+}
+
+func (f *fakeADO) statusCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.statuses...)
+}
+
+func (f *fakeADO) commentCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.comments...)
 }
 
 // fakeTokenProvider is the injected identity seam: a fixed token, no live mint, so

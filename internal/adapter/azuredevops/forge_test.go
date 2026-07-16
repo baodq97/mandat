@@ -135,6 +135,11 @@ func TestCreatePR_PostsDraftPRUnderBearer(t *testing.T) {
 	if sent.Title != "US-0004: add the version subcommand" {
 		t.Errorf("title = %q, want the input title", sent.Title)
 	}
+	// WorkItemID was left empty, so the request must omit workItemRefs entirely
+	// rather than send an empty array.
+	if strings.Contains(string(got.body), "workItemRefs") {
+		t.Errorf("body = %s, want no workItemRefs key when WorkItemID is empty", got.body)
+	}
 
 	// The parsed 201 carries the PR id, url, and createdBy = the Dev agent user.
 	if res.ID != 7 {
@@ -150,6 +155,34 @@ func TestCreatePR_PostsDraftPRUnderBearer(t *testing.T) {
 	// The token reached ADO only through the injected provider, minted for "dev".
 	if roles := tp.calls(); len(roles) != 1 || roles[0] != "dev" {
 		t.Errorf("token mint calls = %v, want exactly one for role dev", roles)
+	}
+}
+
+func TestCreatePR_WorkItemIDLinksWorkItemRef(t *testing.T) {
+	t.Parallel()
+
+	srv, rec := prServer(t, http.StatusCreated, pullRequest7)
+	a := newAdapter(t, srv, &fakeTokenProvider{token: testToken}, nil)
+
+	_, err := a.CreatePR(context.Background(), CreatePRInput{
+		Repo:        "mandat",
+		Branch:      "mandat/task-42",
+		BaseBranch:  "main",
+		Title:       "US-0004: add the version subcommand",
+		Description: "Opened by mandat under the Dev agent-user mandate.",
+		WorkItemID:  "17",
+	})
+	if err != nil {
+		t.Fatalf("CreatePR() error = %v, want nil", err)
+	}
+
+	got := rec.recorded(t)
+	var sent createPRRequest
+	if err := json.Unmarshal(got.body, &sent); err != nil {
+		t.Fatalf("PR body is not JSON: %v (%s)", err, got.body)
+	}
+	if len(sent.WorkItemRefs) != 1 || sent.WorkItemRefs[0].ID != "17" {
+		t.Errorf("workItemRefs = %+v, want [{id:17}]", sent.WorkItemRefs)
 	}
 }
 

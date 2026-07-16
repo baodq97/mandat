@@ -72,12 +72,26 @@ const (
 	ModelOpus   ModelTier = "opus"
 )
 
+// defaultInProgressState is what tracker.states.in_progress resolves to when
+// config.yaml omits it (US-0018): the work-item state serve applies on
+// dispatch, before the runner spawns.
+const defaultInProgressState = "Doing"
+
+// TrackerStatesConfig names the work-item states serve writes back onto the
+// source work item as a run's lifecycle advances (US-0018). It carries no
+// done/completed state: mandat never writes one (RFC-0001 §Human plane —
+// ratification is a human action, not something the pipeline sets).
+type TrackerStatesConfig struct {
+	InProgress string `yaml:"in_progress,omitempty"`
+}
+
 // TrackerConfig names the tracker instance a mandat installation polls:
 // which adapter, and the org/project scope within it (spec §4.10).
 type TrackerConfig struct {
-	Kind    TrackerKind `yaml:"kind"`
-	Org     string      `yaml:"org"`
-	Project string      `yaml:"project"`
+	Kind    TrackerKind         `yaml:"kind"`
+	Org     string              `yaml:"org"`
+	Project string              `yaml:"project"`
+	States  TrackerStatesConfig `yaml:"states,omitempty"`
 }
 
 // AuthConfig names the credential path token acquisition uses (spec §4.10).
@@ -217,11 +231,21 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("config: parse %s: %w", path, err)
 	}
+	cfg.applyDefaults()
 
 	if errs := cfg.validate(); len(errs) > 0 {
 		return nil, errs
 	}
 	return &cfg, nil
+}
+
+// applyDefaults fills in optional fields Load leaves unset before validation
+// runs, so an omitted field never surfaces as a violation. It runs ahead of
+// validate so validation always sees the resolved value.
+func (c *Config) applyDefaults() {
+	if c.Tracker.States.InProgress == "" {
+		c.Tracker.States.InProgress = defaultInProgressState
+	}
 }
 
 func (c *Config) validate() ValidationErrors {
