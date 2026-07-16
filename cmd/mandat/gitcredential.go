@@ -94,9 +94,10 @@ func buildBroker(cfg *config.Config) (*identity.Broker, error) {
 // falling back to the file named by MANDAT_CLIENT_SECRET_FILE (whitespace
 // trimmed). The file fallback exists so the spawned agent's git-credential helper
 // can mint from the child env, which by AC-15 carries the file PATH but never the
-// secret value; production's managed-identity mode uses neither. A read failure or
-// an unset pair is returned as an error naming the cause, so the mint fails fast
-// with a clear reason rather than an opaque AADSTS error downstream.
+// secret value; production's managed-identity mode uses neither. A read failure,
+// an unset pair, or a file that reads fine but trims to empty is returned as an
+// error naming the cause, so the mint fails fast with a clear reason rather than
+// the opaque AADSTS error downstream that an empty secret would otherwise produce.
 func resolveClientSecret() (string, error) {
 	if v := os.Getenv("MANDAT_CLIENT_SECRET"); v != "" {
 		return v, nil
@@ -106,7 +107,11 @@ func resolveClientSecret() (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("read MANDAT_CLIENT_SECRET_FILE %q: %w", f, err)
 		}
-		return strings.TrimSpace(string(b)), nil
+		secret := strings.TrimSpace(string(b))
+		if secret == "" {
+			return "", fmt.Errorf("MANDAT_CLIENT_SECRET_FILE %q is empty", f)
+		}
+		return secret, nil
 	}
 	return "", fmt.Errorf("neither MANDAT_CLIENT_SECRET nor MANDAT_CLIENT_SECRET_FILE is set")
 }

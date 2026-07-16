@@ -16,6 +16,7 @@ import (
 
 	"github.com/baodq97/mandat/internal/adapter/azuredevops"
 	"github.com/baodq97/mandat/internal/config"
+	"github.com/baodq97/mandat/internal/identity"
 	"github.com/baodq97/mandat/internal/journal"
 	"github.com/baodq97/mandat/internal/orchestrator"
 	"github.com/baodq97/mandat/internal/result"
@@ -285,6 +286,72 @@ func TestSelectSpawner_PilotEscapeHatch(t *testing.T) {
 			t.Errorf("selectSpawner() = %T, want workspace.DefaultSpawner", got)
 		}
 	})
+}
+
+// TestReviewerIdentity_ReturnsAgentUserNameNotID proves reviewerIdentity reads
+// the reviewer role's AgentUserName, not its AgentUserID. verify.Verify compares
+// the probe's returned identity against TaskContract.AssignedTo, which ADO
+// populates as a UPN (System.AssignedTo.uniqueName) — wiring the object id here
+// would make that comparison vacuous and never certify a real PR.
+func TestReviewerIdentity_ReturnsAgentUserNameNotID(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{
+		Roles: map[string]config.RoleConfig{
+			"reviewer": {
+				AgentUserID:   "11111111-1111-1111-1111-111111111111",
+				AgentUserName: reviewerUser,
+			},
+		},
+	}
+	if got := reviewerIdentity(cfg); got != reviewerUser {
+		t.Errorf("reviewerIdentity() = %q, want the reviewer role's AgentUserName %q", got, reviewerUser)
+	}
+}
+
+// TestBuildReviewerProbe_NoReviewerRoleReturnsStub proves the fail-closed default:
+// with no `reviewer` role configured, buildReviewerProbe returns the stub whose
+// FindPR always errors, holding a live run at needs-human rather than certifying
+// an unprobed PR (RFC-0001 AC-27).
+func TestBuildReviewerProbe_NoReviewerRoleReturnsStub(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{}
+
+	probe, err := buildReviewerProbe(cfg, nil, reviewerUser)
+	if err != nil {
+		t.Fatalf("buildReviewerProbe() error = %v, want nil", err)
+	}
+	if probe.Identity() != reviewerUser {
+		t.Errorf("probe.Identity() = %q, want %q", probe.Identity(), reviewerUser)
+	}
+	if _, err := probe.FindPR(context.Background(), verify.PRRef{Repo: "mandat", Branch: "mandat/task-42"}); err == nil {
+		t.Error("probe.FindPR() error = nil, want the stub's always-error with no reviewer role configured")
+	}
+}
+
+// TestBuildReviewerProbe_ReviewerRoleReturnsRealProbe proves the live-wiring
+// branch: a configured `reviewer` role yields a probe carrying that role's own
+// identity, the second azuredevops.Adapter instance that mints Reviewer tokens
+// distinct from the Dev agent user (writer != scorer, RFC-0001 §4.1).
+func TestBuildReviewerProbe_ReviewerRoleReturnsRealProbe(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{
+		Tracker: config.TrackerConfig{Org: skeletonOrg, Project: skeletonProject},
+		Roles: map[string]config.RoleConfig{
+			"reviewer": {AgentUserName: reviewerUser},
+		},
+	}
+	// The broker is never minted from in this test (only Identity() is asserted),
+	// so a throwaway secret credential is enough to satisfy buildReviewerProbe's
+	// *identity.Broker parameter.
+	broker := identity.NewBroker(&config.Config{}, identity.NewSecretCredential("unused"), identity.AzureDevOpsResource)
+
+	probe, err := buildReviewerProbe(cfg, broker, reviewerUser)
+	if err != nil {
+		t.Fatalf("buildReviewerProbe() error = %v, want nil", err)
+	}
+	if probe.Identity() != reviewerUser {
+		t.Errorf("probe.Identity() = %q, want the reviewer role's identity %q", probe.Identity(), reviewerUser)
+	}
 }
 
 // newSkeleton composes runTask's dependencies from the §9 doubles and polls the one

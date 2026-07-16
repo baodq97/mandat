@@ -91,17 +91,22 @@ type PRFinding struct {
 	URL       string
 }
 
-// FindPR looks up the pull request open from branch in repo, authorized
+// FindPR looks up the active pull request open from branch in repo, authorized
 // through the adapter's own role — a reviewer-role Adapter instance mints
 // Reviewer tokens, so the call is the out-of-band probe a distinct principal
-// from the Dev agent user makes (writer != scorer, RFC-0001 §4.1). It searches
-// by sourceRefName across every PR status (active, completed, abandoned) so a
-// PR the Dev agent user opened is found regardless of its current status.
+// from the Dev agent user makes (writer != scorer, RFC-0001 §4.1). The search
+// is restricted to status=active rather than "all": the run's own draft PR is
+// always active in this slice, and ADO documents no ordering on the list
+// response, so a same-branch re-run whose earlier PR was abandoned could have
+// that dead PR sort first and get false-certified as existing under an
+// unfiltered search. When more than one active PR matches, the tie-break picks
+// the highest pullRequestId (the newest) deterministically rather than
+// trusting response order.
 func (a *Adapter) FindPR(ctx context.Context, repo, branch string) (PRFinding, error) {
 	u := a.base.JoinPath(a.org, a.project, "_apis", "git", "repositories", repo, "pullrequests")
 	q := u.Query()
 	q.Set("searchCriteria.sourceRefName", refHeadsPrefix+branch)
-	q.Set("searchCriteria.status", "all")
+	q.Set("searchCriteria.status", "active")
 	q.Set("api-version", apiVersion)
 	u.RawQuery = q.Encode()
 
@@ -113,6 +118,11 @@ func (a *Adapter) FindPR(ctx context.Context, repo, branch string) (PRFinding, e
 		return PRFinding{}, nil
 	}
 	pr := resp.Value[0]
+	for _, candidate := range resp.Value[1:] {
+		if candidate.PullRequestID > pr.PullRequestID {
+			pr = candidate
+		}
+	}
 	return PRFinding{
 		Exists:    true,
 		CreatedBy: pr.CreatedBy.UniqueName,

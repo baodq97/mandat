@@ -98,6 +98,25 @@ func TestResolveClientSecret(t *testing.T) {
 		}
 	})
 
+	t.Run("empty-but-readable file errors naming the path", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "secret")
+		if err := os.WriteFile(path, []byte("   \n"), 0o600); err != nil {
+			t.Fatalf("WriteFile() error = %v", err)
+		}
+		t.Setenv("MANDAT_CLIENT_SECRET", "")
+		t.Setenv("MANDAT_CLIENT_SECRET_FILE", path)
+		got, err := resolveClientSecret()
+		if err == nil {
+			t.Fatalf("resolveClientSecret() error = nil, want an error naming %q (a blank file must not silently mint an empty secret)", path)
+		}
+		if got != "" {
+			t.Errorf("resolveClientSecret() = %q, want empty on error", got)
+		}
+		if !strings.Contains(err.Error(), path) {
+			t.Errorf("resolveClientSecret() error = %q, want it to name %q", err.Error(), path)
+		}
+	})
+
 	t.Run("nonexistent file path errors naming the path", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "missing")
 		t.Setenv("MANDAT_CLIENT_SECRET", "")
