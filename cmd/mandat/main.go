@@ -36,12 +36,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 		// writer-only seam. The protocol core (gitCredential) stays stdin-injectable
 		// for tests.
 		return gitCredentialCmd(args[1:], os.Stdin, stdout, stderr)
+	case "remit-guard":
+		// remit-guard is a Claude Code PreToolUse hook (ADR-0006 §Isolation): Claude
+		// Code writes the tool-call JSON on stdin and reads the allow/deny decision
+		// from stdout, so like git-credential this reads os.Stdin directly rather
+		// than through run's writer-only seam. The core (remitGuard) stays
+		// stdin-injectable for tests.
+		return remitGuardCmd(args[1:], os.Stdin, stdout, stderr)
 	default:
 		return designGated(stderr)
 	}
 }
 
 func designGated(stderr io.Writer) int {
-	fmt.Fprintln(stderr, "mandat: only `version`, `serve`, `doctor`, and `git-credential` exist yet; other runtime is design-gated (see docs/)")
+	fmt.Fprintln(stderr, "mandat: only `version`, `serve`, `doctor`, `git-credential`, and `remit-guard` exist yet; other runtime is design-gated (see docs/)")
 	return 2
 }

@@ -24,6 +24,10 @@ func TestRun(t *testing.T) {
 		{name: "serve routes", args: []string{"serve", "--config", "/nonexistent/mandat.yaml"}, wantCode: 1, wantStderr: "config"},
 		{name: "doctor routes", args: []string{"doctor", "--config", "/nonexistent/mandat.yaml"}, wantCode: 1, wantStderr: "config"},
 		{name: "git-credential routes", args: []string{"git-credential", "--config", "/nonexistent/mandat.yaml", "get"}, wantCode: 1, wantStderr: "config"},
+		// remit-guard reads no config, so unlike the other subcommands its
+		// deterministic dispatch proof is a flag error rather than a config-load
+		// error; this also avoids the test depending on the test process's stdin.
+		{name: "remit-guard routes", args: []string{"remit-guard", "--bogus-flag"}, wantCode: 2, wantStderr: "flag provided but not defined"},
 	}
 
 	for _, tt := range tests {
