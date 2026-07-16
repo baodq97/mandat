@@ -1,8 +1,8 @@
 ---
 id: US-0001
 title: Contracts — TaskContract and ResultContract Go types with JSON-schema validation
-status: open
-owner: TBD
+status: done
+owner: baodq97
 date: 2026-07-16
 priority: P0
 ---

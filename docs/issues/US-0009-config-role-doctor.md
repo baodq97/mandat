@@ -1,8 +1,8 @@
 ---
 id: US-0009
 title: Config, role resolution, and mandat doctor
-status: open
-owner: TBD
+status: done
+owner: baodq97
 date: 2026-07-16
 priority: P2
 ---

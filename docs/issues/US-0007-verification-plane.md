@@ -1,8 +1,8 @@
 ---
 id: US-0007
 title: Verification plane — gate re-run, diff-inside-remit consumption, PR-existence probe
-status: open
-owner: TBD
+status: done
+owner: baodq97
 date: 2026-07-16
 priority: P2
 ---

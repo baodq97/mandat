@@ -1,8 +1,8 @@
 ---
 id: US-0004
 title: Tracker adapter — WIQL poll, TaskContract mapping, ADO work-item and PR write
-status: open
-owner: TBD
+status: done
+owner: baodq97
 date: 2026-07-16
 priority: P1
 ---

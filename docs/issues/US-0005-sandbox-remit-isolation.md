@@ -1,8 +1,8 @@
 ---
 id: US-0005
 title: Sandbox / remit isolation — mirror cache, worktree, sparse checkout, diff-in-remit
-status: open
-owner: TBD
+status: done
+owner: baodq97
 date: 2026-07-16
 priority: P1
 ---

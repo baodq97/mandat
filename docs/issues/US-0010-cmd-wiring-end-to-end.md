@@ -1,8 +1,8 @@
 ---
 id: US-0010
 title: cmd wiring — serve dispatch loop running the skeleton end to end
-status: open
-owner: TBD
+status: done
+owner: baodq97
 date: 2026-07-16
 priority: P3
 ---

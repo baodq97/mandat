@@ -1,8 +1,8 @@
 ---
 id: US-0006
 title: Runner supervisor — spawn Claude Code headless, OS-user isolation, stream-json, session, ResultContract read
-status: open
-owner: TBD
+status: done
+owner: baodq97
 date: 2026-07-16
 priority: P1
 ---

@@ -1,8 +1,8 @@
 ---
 id: US-0003
 title: Journal, tasks, runs, and results SQLite store
-status: open
-owner: TBD
+status: done
+owner: baodq97
 date: 2026-07-16
 priority: P0
 ---

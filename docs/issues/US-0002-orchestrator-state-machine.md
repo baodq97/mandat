@@ -1,8 +1,8 @@
 ---
 id: US-0002
 title: Orchestrator — pure-function state machine (Next)
-status: open
-owner: TBD
+status: done
+owner: baodq97
 date: 2026-07-16
 priority: P0
 ---
