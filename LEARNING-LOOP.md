@@ -74,3 +74,12 @@ Format: `date | what escaped | where it should have been caught | lesson | encod
   (mirroring the product's own per-task worktree invariant), and the lead
   serializes own-tree git ops while such agents run | this entry; verifier
   briefs now recommend worktree isolation
+- 2026-07-16 | The lead dispatched a test-writing agent with "the merge has
+  landed, trust the working tree" before actually running the merge; the agent
+  read main, found neither feature, and correctly halted instead of inventing
+  the missing production surface | the dispatch step - the lead's own
+  pre-dispatch checklist | state-dependent dispatches name the exact commit or
+  branch the agent must see, and the lead verifies that state exists before
+  sending; an agent that halts on a false premise is doing its job | this
+  entry; the halting behavior itself is the swe-flow implementer contract
+  working as designed
