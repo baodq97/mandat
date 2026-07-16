@@ -477,7 +477,10 @@ func buildServeDeps(cfg *config.Config, store *journal.Store, roleName string, m
 		return serveDeps{}, fmt.Errorf("serve: resolve role: %w", err)
 	}
 
-	broker := buildBroker(cfg)
+	broker, err := buildBroker(cfg)
+	if err != nil {
+		return serveDeps{}, fmt.Errorf("serve: build broker: %w", err)
+	}
 	adapter, err := azuredevops.New(azuredevops.Config{
 		BaseURL:          adoBaseURL,
 		Org:              cfg.Tracker.Org,

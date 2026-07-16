@@ -40,7 +40,13 @@ func gitCredentialCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) 
 		return 1
 	}
 
-	return gitCredential(context.Background(), buildBroker(cfg), op, *roleName, *username, stdin, stdout, stderr)
+	broker, err := buildBroker(cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "mandat git-credential: %v\n", err)
+		return 1
+	}
+
+	return gitCredential(context.Background(), broker, op, *roleName, *username, stdin, stdout, stderr)
 }
 
 // gitCredential is the protocol core, split from the config/flag plumbing so it is
@@ -64,7 +70,7 @@ func gitCredential(ctx context.Context, src identity.TokenSource, op, role, user
 
 // buildBroker constructs the delegated-token broker from config. Shared by serve,
 // doctor, and the credential helper so all three mint through one path (ADR-0005).
-func buildBroker(cfg *config.Config) *identity.Broker {
+func buildBroker(cfg *config.Config) (*identity.Broker, error) {
 	var cred identity.ClientCredential
 	switch cfg.Auth.Mode {
 	case config.AuthArcManagedIdentity:
@@ -75,26 +81,32 @@ func buildBroker(cfg *config.Config) *identity.Broker {
 		// mints leg 1 from a client secret in MANDAT_CLIENT_SECRET, or the file named
 		// by MANDAT_CLIENT_SECRET_FILE when this process is itself the spawned child's
 		// git-credential helper (see resolveClientSecret).
-		cred = identity.NewSecretCredential(resolveClientSecret())
+		secret, err := resolveClientSecret()
+		if err != nil {
+			return nil, err
+		}
+		cred = identity.NewSecretCredential(secret)
 	}
-	return identity.NewBroker(cfg, cred, identity.AzureDevOpsResource)
+	return identity.NewBroker(cfg, cred, identity.AzureDevOpsResource), nil
 }
 
 // resolveClientSecret returns the pilot client-secret from MANDAT_CLIENT_SECRET,
 // falling back to the file named by MANDAT_CLIENT_SECRET_FILE (whitespace
 // trimmed). The file fallback exists so the spawned agent's git-credential helper
 // can mint from the child env, which by AC-15 carries the file PATH but never the
-// secret value; production's managed-identity mode uses neither. An empty return
-// is passed through unchanged so the mint fails with a clear Entra error rather
-// than here.
-func resolveClientSecret() string {
+// secret value; production's managed-identity mode uses neither. A read failure or
+// an unset pair is returned as an error naming the cause, so the mint fails fast
+// with a clear reason rather than an opaque AADSTS error downstream.
+func resolveClientSecret() (string, error) {
 	if v := os.Getenv("MANDAT_CLIENT_SECRET"); v != "" {
-		return v
+		return v, nil
 	}
 	if f := os.Getenv("MANDAT_CLIENT_SECRET_FILE"); f != "" {
-		if b, err := os.ReadFile(f); err == nil { //nolint:gosec // MANDAT_CLIENT_SECRET_FILE is operator-set config (pilot), not untrusted input; prod uses managed-identity and never reads a secret file
-			return strings.TrimSpace(string(b))
+		b, err := os.ReadFile(f) //nolint:gosec // MANDAT_CLIENT_SECRET_FILE is operator-set config (pilot), not untrusted input; prod uses managed-identity and never reads a secret file
+		if err != nil {
+			return "", fmt.Errorf("read MANDAT_CLIENT_SECRET_FILE %q: %w", f, err)
 		}
+		return strings.TrimSpace(string(b)), nil
 	}
-	return ""
+	return "", fmt.Errorf("neither MANDAT_CLIENT_SECRET nor MANDAT_CLIENT_SECRET_FILE is set")
 }
