@@ -113,6 +113,7 @@ func TestLoad_ValidRoundTrips(t *testing.T) {
 				Playbook:        "playbooks/qa.md",
 			},
 		},
+		Runner:        RunnerConfig{PoolSize: 1},
 		Budget:        BudgetConfig{MaxUSDPerRun: 5},
 		Notifications: NotificationConfig{Teams: []string{"https://teams.webhook.example/xxxx"}},
 	}
@@ -177,6 +178,75 @@ func TestLoad_TrackerStatesInProgress(t *testing.T) {
 		}
 		if got := cfg.Tracker.States.InProgress; got != "In Development" {
 			t.Errorf("Tracker.States.InProgress = %q, want %q", got, "In Development")
+		}
+	})
+}
+
+// TestLoad_RunnerPoolSize covers runner.pool_size (US-0012 AC-12.1): an
+// omitted or zero field resolves to the 1 default, and an explicit value
+// round-trips unchanged.
+func TestLoad_RunnerPoolSize(t *testing.T) {
+	t.Parallel()
+
+	t.Run("defaults to 1 when unset", func(t *testing.T) {
+		t.Parallel()
+
+		path := writeConfig(t, baseYAML)
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load(%q) error = %v, want nil", path, err)
+		}
+		if got := cfg.Runner.PoolSize; got != 1 {
+			t.Errorf("Runner.PoolSize = %d, want 1", got)
+		}
+	})
+
+	t.Run("explicit value round-trips", func(t *testing.T) {
+		t.Parallel()
+
+		path := writeConfig(t, baseYAML+"runner:\n  pool_size: 4\n")
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load(%q) error = %v, want nil", path, err)
+		}
+		if got := cfg.Runner.PoolSize; got != 4 {
+			t.Errorf("Runner.PoolSize = %d, want 4", got)
+		}
+	})
+}
+
+// TestLoad_BudgetMaxUSDInFlight covers budget.max_usd_in_flight
+// (US-0012 AC-12.8): an omitted field resolves to 0 ("derive"), and an
+// explicit value at or above max_usd_per_run round-trips unchanged.
+func TestLoad_BudgetMaxUSDInFlight(t *testing.T) {
+	t.Parallel()
+
+	t.Run("defaults to 0 when unset", func(t *testing.T) {
+		t.Parallel()
+
+		path := writeConfig(t, baseYAML)
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load(%q) error = %v, want nil", path, err)
+		}
+		if got := cfg.Budget.MaxUSDInFlight; got != 0 {
+			t.Errorf("Budget.MaxUSDInFlight = %v, want 0", got)
+		}
+	})
+
+	t.Run("explicit value round-trips", func(t *testing.T) {
+		t.Parallel()
+
+		path := writeConfig(t, strings.Replace(baseYAML,
+			"budget:\n  max_usd_per_run: 5\n",
+			"budget:\n  max_usd_per_run: 5\n  max_usd_in_flight: 20\n",
+			1))
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load(%q) error = %v, want nil", path, err)
+		}
+		if got := cfg.Budget.MaxUSDInFlight; got != 20 {
+			t.Errorf("Budget.MaxUSDInFlight = %v, want 20", got)
 		}
 	})
 }
@@ -314,6 +384,20 @@ func TestLoad_RejectsInvalid(t *testing.T) {
 			name:    "non-positive budget",
 			mutate:  func(s string) string { return strings.Replace(s, "max_usd_per_run: 5", "max_usd_per_run: 0", 1) },
 			wantSub: "budget.max_usd_per_run",
+		},
+		{
+			name: "negative pool_size",
+			mutate: func(s string) string {
+				return s + "runner:\n  pool_size: -1\n"
+			},
+			wantSub: "runner.pool_size",
+		},
+		{
+			name: "max_usd_in_flight below max_usd_per_run",
+			mutate: func(s string) string {
+				return strings.Replace(s, "budget:\n  max_usd_per_run: 5\n", "budget:\n  max_usd_per_run: 5\n  max_usd_in_flight: 4\n", 1)
+			},
+			wantSub: "budget.max_usd_in_flight",
 		},
 	}
 
