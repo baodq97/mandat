@@ -1,8 +1,8 @@
 ---
 id: US-0008
 title: Identity broker — ADR-0005 token mint, tracker MCP wiring, git credential delivery
-status: open
-owner: TBD
+status: done
+owner: baodq97
 date: 2026-07-16
 priority: P2
 ---
@@ -42,7 +42,13 @@ and the git credential-delivery backing (mechanism TBD by the spike).
       mandat-provided MCP server backed by the broker (`--mcp-config`), so no tracker
       token reaches the child (RFC-0001 §Identity injection; §9 double: fake `claude`
       binary, MCP config wiring check — this proves wiring, not the live ADO round-trip,
-      which US-0004 covers separately).
+      which US-0004 covers separately). Superseded for the walking skeleton by the
+      ADR-0006 post-acceptance correction (2026-07-16): the MVP runner keeps all tracker
+      I/O (Poll, ApplyStatus, Comment, CreatePR, FindPR) parent-side in the orchestrator
+      and ADO adapter under broker-minted tokens and wires no child-side tracker MCP, so
+      this AC's invariant — no tracker token reaches the child — is met parent-side and
+      more strongly, the child holding no tracker surface at all; the named `--mcp-config`
+      mechanism returns only under a future interactive-agent phase's own governed change.
 
 ## Acceptance criteria — git credential delivery (unblocked by S-credential-delivery)
 
