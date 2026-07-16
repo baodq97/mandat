@@ -8,8 +8,8 @@
 // agent's out-of-remit escape — and yields the result_ok-eligible event only when
 // all three pass.
 //
-// Two ADR-0003 invariants shape this package and are worth stating because the
-// code cannot show them on its own:
+// Two RFC-0001 invariants (§4.7, US-0007) shape this package and are worth
+// stating because the code cannot show them on its own:
 //
 //   - Re-run ground truth, never trust the agent summary (RFC-0001 §4.7,
 //     AC-23). The verifier's input is the worktree and the task, never a
