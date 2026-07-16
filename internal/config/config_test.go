@@ -79,7 +79,7 @@ func TestLoad_ValidRoundTrips(t *testing.T) {
 			Kind:    TrackerAzureDevOps,
 			Org:     "baodo0220",
 			Project: "mandat-dogfood",
-			States:  TrackerStatesConfig{InProgress: defaultInProgressState},
+			States:  TrackerStatesConfig{InProgress: DefaultInProgressState},
 		},
 		Auth: AuthConfig{Mode: AuthArcManagedIdentity},
 		Entra: EntraConfig{

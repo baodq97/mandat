@@ -30,6 +30,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return serve(args[1:], stdout, stderr)
 	case "doctor":
 		return doctor(args[1:], stdout, stderr)
+	case "init":
+		return initCmd(args[1:], os.Stdin, stdout, stderr)
 	case "git-credential":
 		// The credential helper is a stdio filter: git writes its request on stdin,
 		// so this one subcommand reads os.Stdin directly rather than through run's
@@ -49,6 +51,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 
 func designGated(stderr io.Writer) int {
-	fmt.Fprintln(stderr, "mandat: only `version`, `serve`, `doctor`, `git-credential`, and `remit-guard` exist yet; other runtime is design-gated (see docs/)")
+	fmt.Fprintln(stderr, "mandat: only `version`, `serve`, `doctor`, `init`, `git-credential`, and `remit-guard` exist yet; other runtime is design-gated (see docs/)")
 	return 2
 }

@@ -73,14 +73,17 @@ const (
 	ModelOpus   ModelTier = "opus"
 )
 
-// defaultInProgressState is what tracker.states.in_progress resolves to when
+// DefaultInProgressState is what tracker.states.in_progress resolves to when
 // config.yaml omits it (US-0011): the work-item state serve applies on
-// dispatch, before the runner spawns.
-const defaultInProgressState = "Doing"
+// dispatch, before the runner spawns. Exported so mandat init can state the
+// same value in the comment it writes next to the omitted field (US-0013
+// AC-13.2) without duplicating the literal.
+const DefaultInProgressState = "Doing"
 
-// defaultPoolSize is what runner.pool_size resolves to when config.yaml
-// omits it or sets it to zero (US-0012 AC-12.1).
-const defaultPoolSize = 1
+// DefaultPoolSize is what runner.pool_size resolves to when config.yaml
+// omits it or sets it to zero (US-0012 AC-12.1). Exported for the same
+// reason as DefaultInProgressState.
+const DefaultPoolSize = 1
 
 // TrackerStatesConfig names the work-item states serve writes back onto the
 // source work item as a run's lifecycle advances (US-0011). It carries no
@@ -264,10 +267,10 @@ func Load(path string) (*Config, error) {
 // validate so validation always sees the resolved value.
 func (c *Config) applyDefaults() {
 	if c.Tracker.States.InProgress == "" {
-		c.Tracker.States.InProgress = defaultInProgressState
+		c.Tracker.States.InProgress = DefaultInProgressState
 	}
 	if c.Runner.PoolSize == 0 {
-		c.Runner.PoolSize = defaultPoolSize
+		c.Runner.PoolSize = DefaultPoolSize
 	}
 }
 
