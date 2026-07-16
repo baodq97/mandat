@@ -22,6 +22,9 @@ type CreatePRInput struct {
 	BaseBranch  string
 	Title       string
 	Description string
+	// WorkItemID, when set, links the PR to the source work item at creation
+	// (workItemRefs on the wire). Empty omits the link entirely.
+	WorkItemID string
 }
 
 // CreatePRResult is the parsed 201 pull-request response. CreatedBy is the
@@ -45,7 +48,7 @@ func (a *Adapter) CreatePR(ctx context.Context, in CreatePRInput) (CreatePRResul
 	q.Set("api-version", apiVersion)
 	u.RawQuery = q.Encode()
 
-	body, err := json.Marshal(createPRRequest{
+	req := createPRRequest{
 		SourceRefName: refHeadsPrefix + in.Branch,
 		TargetRefName: refHeadsPrefix + in.BaseBranch,
 		Title:         in.Title,
@@ -53,7 +56,12 @@ func (a *Adapter) CreatePR(ctx context.Context, in CreatePRInput) (CreatePRResul
 		// Draft-only is the MVP autonomy ceiling (RFC-0001 §10): no code path here
 		// opens a ready PR, so isDraft is a constant, not a caller option.
 		IsDraft: true,
-	})
+	}
+	if in.WorkItemID != "" {
+		req.WorkItemRefs = []workItemRef{{ID: in.WorkItemID}}
+	}
+
+	body, err := json.Marshal(req)
 	if err != nil {
 		return CreatePRResult{}, fmt.Errorf("azuredevops: encode create-PR body for repo %s: %w", in.Repo, err)
 	}
@@ -84,11 +92,18 @@ func (e *APIError) Error() string {
 }
 
 type createPRRequest struct {
-	SourceRefName string `json:"sourceRefName"`
-	TargetRefName string `json:"targetRefName"`
-	Title         string `json:"title"`
-	Description   string `json:"description"`
-	IsDraft       bool   `json:"isDraft"`
+	SourceRefName string        `json:"sourceRefName"`
+	TargetRefName string        `json:"targetRefName"`
+	Title         string        `json:"title"`
+	Description   string        `json:"description"`
+	IsDraft       bool          `json:"isDraft"`
+	WorkItemRefs  []workItemRef `json:"workItemRefs,omitempty"`
+}
+
+// workItemRef links a PR to a work item by id on create; ADO accepts the id as
+// a string in this wire shape regardless of the work item's numeric id.
+type workItemRef struct {
+	ID string `json:"id"`
 }
 
 // createPRResponse is the subset of the 201 pull-request response the adapter
