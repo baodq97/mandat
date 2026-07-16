@@ -412,6 +412,7 @@ func newSkeleton(t *testing.T, scenario string) (serveDeps, *fakeADO, task.TaskC
 		Forge:            adapter,
 		Runner:           runner.New(store, &fakeClaudeSpawner{scenario: scenario}, runner.Config{ClaudePath: os.Args[0], MaxBudgetUSD: 5}),
 		Verifier:         verify.New(&fakeProbe{identity: reviewerUser, info: verify.PRInfo{Exists: true, CreatedBy: devUser, URL: skeletonPRURL}}),
+		StateRoot:        t.TempDir(),
 		Provision:        workspace.Provision,
 		Role:             devRole,
 		ReviewerIdentity: reviewerUser,
