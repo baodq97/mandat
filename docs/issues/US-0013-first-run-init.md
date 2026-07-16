@@ -24,6 +24,9 @@ hand-written YAML.
 GETTING-STARTED.md (the current manual runbook this story partially replaces). US-0009
 (config, role resolution, doctor: the loader and doctor this story builds on). US-0011,
 US-0012 (neighbor story structure).
+`docs/research/entra-agent-id-provisioning-surface.md` (Spike rounds 1 and 2, verified
+2026-07-16: pins the AC-13.1 ADO discovery chain and confirms the Agent ID registry read
+surface AC-13.3(b) uses for the identity picker).
 
 ## Design boundary
 
@@ -33,7 +36,9 @@ README design invariants). `init` generates and explains the file: every optiona
 ships with a comment stating its default and effect, and `init` writes no configuration
 state anywhere it does not also print or leave in a diffable file. It never hides setup
 behind an opaque store, a hidden cache, or a write path the operator cannot inspect with
-`git diff` or a text editor.
+`git diff` or a text editor. `init` is expected to run under `sudo`, for the root-owned
+`/etc/mandat/config.yaml` write; it resolves the invoking operator through `SUDO_USER` for
+every per-user artifact it writes, including the systemd unit (AC-13.6).
 
 ## Problem
 
@@ -54,9 +59,12 @@ Graph or ADO write calls of its own.
 - `mandat init` interviews the operator and writes `/etc/mandat/config.yaml`: discovers
   ADO org, project, and repo urls via the operator's existing `az`-derived token where
   reachable, and prompts for each value it cannot discover.
-- Every optional field in the written file carries a comment naming its default (mirroring
-  `config.go`'s `applyDefaults`: `tracker.states.in_progress`, `runner.pool_size`,
-  `budget.max_usd_in_flight`, `roles.<name>.model_tier`, and every other `omitempty` field).
+- Every optional field in the written file carries a comment naming its default, derive
+  rule, or explicit no-default plus omission behavior (AC-13.2): `applyDefaults` covers only
+  `tracker.states.in_progress` and `runner.pool_size`; `budget.max_usd_in_flight` derives as
+  `runner.pool_size * budget.max_usd_per_run` when omitted; `roles.<name>.model_tier` has no
+  default (omitted means no `--model` flag is passed); and every other `omitempty` field in
+  `config.go` states its own default or derive rule the same way.
 - `init` ships embedded playbook templates for the `dev` and `reviewer` roles and writes
   them to the configured `playbook` paths on request, instead of requiring the operator to
   hand-author the two stub files GETTING-STARTED §5 shows today.
@@ -84,23 +92,44 @@ config-writing and token-minting stay separate commands, mirroring the `aws conf
 
 - [ ] AC-13.1 Given an operator with a working `az`-derived token for the target ADO
       organization, running `mandat init` discovers that org, its accessible projects, and
-      their repo urls without the operator retyping them, and falls back to a prompt for
-      any value discovery cannot resolve (no ADO org reachable, ambiguous project match, or
-      an unreachable git remote). Before writing, `init` validates the discovered
-      token/tenant against a real ADO endpoint and refuses to write `config.yaml` when
-      validation fails; the implementer pins the exact `az`-derived discovery chain used
-      (subcommands, scope) and names it in the PR that lands this story.
+      their repo urls without the operator retyping them, through the pinned chain
+      (`docs/research/entra-agent-id-provisioning-surface.md`, Spike round 2): an
+      ADO-resource token (`az account get-access-token --resource
+      499b84ac-1321-427f-aa17-267ca6975798`) feeds `profile/profiles/me` for the member id,
+      `accounts?memberId={id}` for the org list, `{org}/_apis/projects` for projects, and
+      `{org}/{project}/_apis/git/repositories` for repo names and remote urls. It falls back
+      to a prompt for any value discovery cannot resolve (no ADO org reachable, ambiguous
+      project match, or an unreachable git remote). Before writing, `init` validates the
+      discovered token/tenant against a real ADO endpoint and refuses to write
+      `config.yaml` when validation fails.
 - [ ] AC-13.2 Given a completed `init` interview, observe the written `/etc/mandat/config.yaml`
       parses and passes `config.Load` unmodified, and every optional field present in the
       file (every `omitempty`-tagged key in `internal/config/config.go`) carries an adjacent
-      comment naming its default value.
+      comment that names its default value (`tracker.states.in_progress: Doing`,
+      `runner.pool_size: 1`), states its derive rule (`budget.max_usd_in_flight`: derived as
+      `runner.pool_size * budget.max_usd_per_run` when omitted), or states "no default" with
+      the omission behavior (`roles.<name>.model_tier`: no default; omitted means no
+      `--model` flag is passed).
 - [ ] AC-13.3 Config-surface audit: enumerate every field `config.go`'s `validate*`
-      functions check. Each is either satisfied by `applyDefaults` (a sane default, no
-      operator input required) or belongs to the irreducible set this story requires
-      `init` to prompt for: tracker org and project, per-repo url + remit paths + gates,
-      and per-role identity ids/UPNs (`agent_identity_id`, `agent_user_id`,
-      `agent_user_name`). No field outside those two categories exists; a field found in
-      neither is a defect in this story, not an accepted gap.
+      functions check, plus the two fields `applyDefaults` resolves, and place each in
+      exactly one of three categories. (a) `applyDefaults`-defaulted, no operator input:
+      `tracker.states.in_progress` (defaults to `Doing`), `runner.pool_size` (defaults to
+      `1`). (b) `init`-supplied without prompting: constants fixed by this story's scope
+      (`tracker.kind`: hardcoded to `azure-devops`, the only tracker phase 1 ships;
+      `entra.identity_mode`: hardcoded to `agent-user-pair`, ADR-0005's recommended mode
+      for Azure DevOps); values discovered from the operator's existing `az` session
+      (`tracker.org`, `tracker.project`, `repos.<>.url`, `repos.<>.base_branch`: the AC-13.1
+      ADO chain; `entra.tenant`: the az session's tenant claim; `roles.<>.agent_identity_id`,
+      `roles.<>.agent_user_id`, `roles.<>.agent_user_name`: a registry picker over the
+      blueprint's children, the same az-session pattern AC-13.1 uses for ADO, per the
+      research doc's "registry (read surface)" table); and template-derived paths
+      (`roles.<>.playbook`: the path AC-13.5's embedded template is written to). (c)
+      Irreducible prompts, where no discovery signal or default exists: confirming the
+      discovered tracker org/project (accept or override), which discovered repo(s) to
+      register plus each one's remit `paths` and `gates`, `auth.mode`, `entra.blueprint`
+      (only when US-0014's registry finds none to pick from), `roles.<>.autonomy_ceiling`,
+      and `budget.max_usd_per_run`. A field found in none of the three categories is a
+      defect in this story, not an accepted gap.
 - [ ] AC-13.4 Given `init` writes a config with a missing irreducible field (interview
       aborted early, or a discovery step failed silently), observe `config.Load` on that
       file returns a `ValidationErrors` value whose `FieldError.Path` names the exact
@@ -108,14 +137,17 @@ config-writing and token-minting stay separate commands, mirroring the `aws conf
       matching the existing `FieldError` shape rather than a generic parse failure.
 - [ ] AC-13.5 Given the operator selects the `dev` and `reviewer` roles during the
       interview, observe `init` writes the embedded playbook template to each role's
-      configured `playbook` path, and the written file's content differs from an empty
-      stub (it names the role's remit-scoped, self-review, commit/push, ResultContract-write
-      sequence GETTING-STARTED §5 describes for the Developer playbook, adapted per role).
+      configured `playbook` path, and the written content differs per role: the `dev`
+      template names the remit-scoped implement / self-review / commit-push /
+      ResultContract-write sequence GETTING-STARTED §5 describes; the `reviewer` template
+      (`report` autonomy ceiling, Readers group per GETTING-STARTED §3) names a read /
+      probe / report sequence and contains no commit or push step.
 - [ ] AC-13.6 Given the operator answers "yes" to installing the systemd unit, observe
       `init` writes a unit file matching the GETTING-STARTED §7 shape (`ExecStart` sourcing
-      the env file, `Restart=on-failure`) to the user systemd directory; given "no" or the
-      default (unattended) answer, observe no unit file is written and no `systemctl` call
-      is made.
+      the env file, `Restart=on-failure`) to the invoking operator's user systemd directory
+      (resolved via `SUDO_USER` per the Design boundary, never root's own
+      `~/.config/systemd/user/`); given "no" or the default (unattended) answer, observe no
+      unit file is written and no `systemctl` call is made.
 - [ ] AC-13.7 Given a completed `init` run, observe it invokes the same check functions
       `mandat doctor` runs (`cmd/mandat/doctor.go`'s `claudeVersionCheck`,
       `gitVersionCheck`, `sqliteCheck`, `trackerCheckFor`, `reviewerIdentityCheck`,
@@ -132,7 +164,9 @@ config-writing and token-minting stay separate commands, mirroring the `aws conf
       field (tracker org/project, repo url + remit paths + gates, per-role identity
       ids/UPNs) as a flag and errors naming the specific missing flag instead of prompting.
       Given stdin is not a TTY, observe `init` behaves as if `--non-interactive` was passed,
-      so it never hangs in CI.
+      so it never hangs in CI. `--non-interactive`, and the non-TTY autodetect path,
+      additionally imply `--yes` for the AC-13.12 write confirmation: no prompt of any kind,
+      including the pre-write diff confirmation, fires on either path.
 - [ ] AC-13.10 Given `MANDAT_*` environment variables set for any init input, observe
       `init` accepts them with precedence flags > env > existing config values, and observe
       env inputs carry non-secret values only. Env vars feed the interview only: the
@@ -163,6 +197,7 @@ File-disjoint allowed paths:
 - `internal/config/**` (template/default-comment support only; no change to the validated
   schema itself)
 - `GETTING-STARTED.md`
+- `install.sh` (AC-13.14: prints the next-step message only; no config writes)
 
 ## Dependencies
 
@@ -174,10 +209,9 @@ after those land.
 
 ## Gaps
 
-- The discovery mechanism for "the operator's existing az-derived token" (which `az`
-  subcommands, what scope, how failure is distinguished from "no such credential") is not
-  pinned by any source read for this story; AC-13.1 now requires the implementer to name
-  the exact discovery chain and its fallback behavior in the PR that lands it.
+- The `az`-derived ADO discovery chain gap is closed: the research doc's Spike round 2
+  (2026-07-16) pins the exact chain and confirms it end to end on the dogfood org
+  (AC-13.1); no discovery-chain gap remains for this story's scope.
 - Phase 2 (automating the Entra provisioning ceremony) is now chartered as US-0014, which
   itself needs a spike to pin the least-privilege `az` scope check before implementation;
   this story only records the boundary in "Out of scope" and does not open the spike itself.
