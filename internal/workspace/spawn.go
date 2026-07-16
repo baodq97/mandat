@@ -70,3 +70,35 @@ func (systemdRunSpawner) Spawn(ctx context.Context, spec SpawnSpec) error {
 	}
 	return cmd.Wait()
 }
+
+// DirectSpawner runs the child as the CURRENT user with no systemd-run wrapper,
+// so it needs neither root nor a provisioned mandat-<role> account. It is the
+// pilot/dev escape hatch for VMs that cannot supply those; production uses
+// DefaultSpawner. It DELIBERATELY drops the per-role OS-user + file-permission
+// remit layer (spec §4.5): spec.RoleUser is ignored and the child inherits this
+// process's privileges. The other two remit layers stay active regardless of
+// spawner — sparse checkout keeps out-of-remit paths off disk, the post-hoc
+// diff-inside-remit check holds any out-of-remit edit for a human, and the
+// remit-guard PreToolUse hook denies out-of-remit tool calls — so remit is still
+// enforced mechanically, just with one fewer layer. serve() gates this behind
+// MANDAT_DIRECT_SPAWN so a live install opts in explicitly.
+var DirectSpawner Spawner = directSpawner{}
+
+type directSpawner struct{}
+
+func (directSpawner) Spawn(ctx context.Context, spec SpawnSpec) error {
+	cmd := exec.CommandContext(ctx, spec.Argv[0], spec.Argv[1:]...)
+	cmd.Dir = spec.Dir
+	cmd.Env = spec.Env
+	cmd.Stdin = spec.Stdin
+	cmd.Stdout = spec.Stdout
+	cmd.Stderr = spec.Stderr
+
+	// Same contract as systemdRunSpawner: a start failure is an isolation-setup
+	// failure with no fallback (setup_failed), and a non-zero child exit is the
+	// run outcome returned raw for the runner (US-0006) to classify.
+	if err := cmd.Start(); err != nil {
+		return &SetupError{Op: "spawn", Err: err}
+	}
+	return cmd.Wait()
+}

@@ -438,7 +438,7 @@ func buildServeDeps(cfg *config.Config, store *journal.Store, roleName string, m
 		Store:               store,
 		Tracker:             adapter,
 		Forge:               adapter,
-		Runner:              runner.New(store, workspace.DefaultSpawner, runner.Config{ClaudePath: "claude", MaxBudgetUSD: maxBudget}),
+		Runner:              runner.New(store, selectSpawner(), runner.Config{ClaudePath: "claude", MaxBudgetUSD: maxBudget}),
 		Verifier:            verify.New(reviewerProbe{identity: reviewer}),
 		Provision:           workspace.Provision,
 		Role:                r,
@@ -454,6 +454,19 @@ func buildServeDeps(cfg *config.Config, store *journal.Store, roleName string, m
 		DenyToolHookCommand: self + ` remit-guard --worktree "$CLAUDE_PROJECT_DIR"`,
 		HarnessVersion:      buildinfo.Version(),
 	}, nil
+}
+
+// selectSpawner picks the runner's process spawner. MANDAT_DIRECT_SPAWN is the
+// pilot escape hatch: it swaps the OS-user isolation spawner for a same-user
+// direct exec on pilot/dev VMs that lack root and a provisioned mandat-<role>
+// user (spec §4.5). The default stays the OS-user isolation path;
+// sparse-checkout, the diff-inside-remit check, and the remit-guard hook remain
+// the active remit layers either way.
+func selectSpawner() workspace.Spawner {
+	if os.Getenv("MANDAT_DIRECT_SPAWN") != "" {
+		return workspace.DirectSpawner
+	}
+	return workspace.DefaultSpawner
 }
 
 func repoURLResolver(cfg *config.Config) func(string) (string, error) {
