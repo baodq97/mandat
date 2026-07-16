@@ -193,6 +193,26 @@ func TestWalkingSkeleton_NeedsHumanHold(t *testing.T) {
 	}
 }
 
+// TestSelectSpawner_PilotEscapeHatch proves the pilot toggle: MANDAT_DIRECT_SPAWN
+// (non-empty) swaps in the same-user DirectSpawner for pilot/dev VMs without root,
+// and its absence keeps the OS-user isolation DefaultSpawner (spec §4.5). The two
+// spawners are comparable empty-struct singletons, so the interface values compare
+// by identity.
+func TestSelectSpawner_PilotEscapeHatch(t *testing.T) {
+	t.Run("direct when MANDAT_DIRECT_SPAWN set", func(t *testing.T) {
+		t.Setenv("MANDAT_DIRECT_SPAWN", "1")
+		if got := selectSpawner(); got != workspace.DirectSpawner {
+			t.Errorf("selectSpawner() = %T, want workspace.DirectSpawner", got)
+		}
+	})
+	t.Run("default OS-user isolation otherwise", func(t *testing.T) {
+		t.Setenv("MANDAT_DIRECT_SPAWN", "")
+		if got := selectSpawner(); got != workspace.DefaultSpawner {
+			t.Errorf("selectSpawner() = %T, want workspace.DefaultSpawner", got)
+		}
+	})
+}
+
 // newSkeleton composes runTask's dependencies from the §9 doubles and polls the one
 // fixture work item, returning the wired deps, the ADO fixture (for PR-call
 // assertions), and the polled TaskContract.

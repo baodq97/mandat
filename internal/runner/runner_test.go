@@ -607,6 +607,41 @@ func TestSupervisor_Run_ChildEnvCarriesNoParentSecret(t *testing.T) {
 	}
 }
 
+// TestSupervisor_Run_ChildEnvCarriesModelAuthNotEntraToken proves the two planes
+// buildEnv is required to keep apart: when the runner's own process has Claude
+// Code's model credential set, the child gets it (or claude cannot authenticate
+// at all); the Entra-shaped delegated-token var stays excluded regardless, since
+// allow-listing one named var must never widen into inheriting the rest of the
+// parent env (AC-15).
+func TestSupervisor_Run_ChildEnvCarriesModelAuthNotEntraToken(t *testing.T) {
+	const modelToken = "claude-code-oauth-token-xyz"
+	const entraSecret = "super-secret-delegated-entra-token-xyz"
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", modelToken)
+	t.Setenv("MANDAT_TEST_ENTRA_TOKEN", entraSecret)
+
+	ctx := context.Background()
+	store := openStore(t)
+	req := newRequest(t, config.ModelSonnet)
+	spawner := &fakeClaudeSpawner{scenario: "completed"}
+	sup := New(store, spawner, Config{ClaudePath: os.Args[0], MaxBudgetUSD: 5})
+
+	if _, err := sup.Run(ctx, req); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if v, ok := envValue(spawner.got.Env, "CLAUDE_CODE_OAUTH_TOKEN"); !ok || v != modelToken {
+		t.Errorf("child CLAUDE_CODE_OAUTH_TOKEN = %q (present=%v), want %q; claude cannot authenticate without its own model credential", v, ok, modelToken)
+	}
+	for _, e := range spawner.got.Env {
+		if strings.Contains(e, entraSecret) {
+			t.Errorf("child env leaked the parent Entra secret: %q", e)
+		}
+		if strings.HasPrefix(e, "MANDAT_TEST_ENTRA_TOKEN=") {
+			t.Errorf("child env inherited parent var %q; allow-listing model auth must not widen into a passthrough", e)
+		}
+	}
+}
+
 // TestSupervisor_Resume_UsesResumeFlag proves the resume path swaps --session-id
 // for --resume against the existing session in the same worktree, and journals it.
 func TestSupervisor_Resume_UsesResumeFlag(t *testing.T) {

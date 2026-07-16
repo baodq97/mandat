@@ -334,17 +334,32 @@ func configureGitCredential(ctx context.Context, worktreeDir, helper string) err
 // buildEnv is the child's whole environment: an explicit allow-list, never
 // os.Environ(). Inheriting the parent env would carry the blueprint secret or a
 // delegated token into a process the role OS user controls, the exact breach
-// AC-15 forbids. Git credentials reach git only through the on-demand helper, and
-// Anthropic model auth through the per-role CLAUDE_CONFIG_DIR apiKeyHelper (--bare
-// suppresses ambient discovery), so no secret belongs here. PATH is not a secret
-// and the child needs it to find its tools.
+// AC-15 forbids. Git credentials reach git only through the on-demand helper
+// (S-credential-delivery); the Entra-issued delegated token the identity broker
+// holds is never a named var here and buildEnv never calls os.Environ(), so it
+// cannot leak through this path either way.
+//
+// CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY are a different plane: Claude
+// Code's OWN model-auth credential, not the Entra identity-plane token above.
+// Without one of these (or a CLAUDE_CONFIG_DIR apiKeyHelper) the spawned claude
+// cannot authenticate to run at all, so both are allow-listed straight through
+// from the runner's own process env when the operator has set them there —
+// still a named-var allow-list, never os.Environ(). PATH is not a secret and the
+// child needs it to find its tools.
 func buildEnv(req Request, resultPath string) []string {
-	return []string{
+	env := []string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + req.Home,
 		"CLAUDE_CONFIG_DIR=" + req.ConfigDir,
 		result.EnvVar + "=" + resultPath,
 	}
+	if v := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); v != "" {
+		env = append(env, "CLAUDE_CODE_OAUTH_TOKEN="+v)
+	}
+	if v := os.Getenv("ANTHROPIC_API_KEY"); v != "" {
+		env = append(env, "ANTHROPIC_API_KEY="+v)
+	}
+	return env
 }
 
 // spawnExitCode extracts the child's exit status. A nil error is a clean exit; an
