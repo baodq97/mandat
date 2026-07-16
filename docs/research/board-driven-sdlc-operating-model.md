@@ -49,6 +49,19 @@ provenance; the #36 card already cites "US-0013 AC-13.3(c) and AC-13.9"). There 
 card-vs-doc comparison at any time: not per poll, not at breakdown, not on doc change. Correctness is
 an authoring discipline, not a runtime check; see Probe.
 
+The runtime dispatch contract is the card, not the doc: the adapter lifts the card's AC field into the
+`TaskContract` at dispatch, and the doc's authored AC is never read at runtime. No automated check
+catches an unfaithful or stale card digest; the design relies on two controls, not one.
+Prevention: the planner authors the digest from the repo-canonical doc AC at breakdown (above).
+Backstop: the human at the Done-ratification gate reads the card's governed-doc link (rich-card
+projection, Principle 3) and confirms the delivered work matches the authored AC before dragging to
+Closed. The board's 10-second read (Principle 3) is for routine operational triage: moving a card
+through in-progress and in-review, not the Done gate. Ratifying Done is the one point in the flow
+that consults the linked doc AC. Falsifier: if dogfood measurement shows unfaithful or stale digests
+reaching a ratified Done at a real rate, this provenance-only model is abandoned, not patched, in
+favor of dispatching from the repo-canonical doc AC at runtime or a keyed semantic fidelity check.
+Both are architecture changes deferred to implementation (Probe).
+
 ## Probe — AC-containment check NOT VIABLE (`docs/research/ac-ownership-probe.md`, 2026-07-16)
 
 Two premises died in sequence. First, an earlier draft made the card canonical for the active
