@@ -211,6 +211,27 @@ func TestProvision_ConcurrentDifferentReposDoNotShareALock(t *testing.T) {
 	}
 }
 
+// TestMirrorLock_PerDirRegistry is the cheap regression net the concurrency
+// tests above cannot provide: a global-mutex regression would still let two
+// concurrent Provision calls against different mirrors pass, since neither
+// case actually races two mirrors against each other. This asserts the
+// registry property directly: the same dir always gets the same *sync.Mutex,
+// and different dirs never share one.
+func TestMirrorLock_PerDirRegistry(t *testing.T) {
+	t.Parallel()
+
+	a1 := mirrorLock("dirA")
+	a2 := mirrorLock("dirA")
+	if a1 != a2 {
+		t.Errorf("mirrorLock(%q) = %p then %p, want the same *sync.Mutex on repeat calls", "dirA", a1, a2)
+	}
+
+	b := mirrorLock("dirB")
+	if a1 == b {
+		t.Errorf("mirrorLock(%q) and mirrorLock(%q) returned the same *sync.Mutex, want distinct per-dir locks", "dirA", "dirB")
+	}
+}
+
 func TestGitCredArgs(t *testing.T) {
 	t.Parallel()
 

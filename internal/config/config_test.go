@@ -213,6 +213,19 @@ func TestLoad_RunnerPoolSize(t *testing.T) {
 			t.Errorf("Runner.PoolSize = %d, want 4", got)
 		}
 	})
+
+	t.Run("explicit 0 defaults to 1", func(t *testing.T) {
+		t.Parallel()
+
+		path := writeConfig(t, baseYAML+"runner:\n  pool_size: 0\n")
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load(%q) error = %v, want nil", path, err)
+		}
+		if got := cfg.Runner.PoolSize; got != 1 {
+			t.Errorf("Runner.PoolSize = %d, want 1", got)
+		}
+	})
 }
 
 // TestLoad_BudgetMaxUSDInFlight covers budget.max_usd_in_flight
@@ -247,6 +260,38 @@ func TestLoad_BudgetMaxUSDInFlight(t *testing.T) {
 		}
 		if got := cfg.Budget.MaxUSDInFlight; got != 20 {
 			t.Errorf("Budget.MaxUSDInFlight = %v, want 20", got)
+		}
+	})
+
+	t.Run("explicit 0 stays 0 (derive sentinel)", func(t *testing.T) {
+		t.Parallel()
+
+		path := writeConfig(t, strings.Replace(baseYAML,
+			"budget:\n  max_usd_per_run: 5\n",
+			"budget:\n  max_usd_per_run: 5\n  max_usd_in_flight: 0\n",
+			1))
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load(%q) error = %v, want nil", path, err)
+		}
+		if got := cfg.Budget.MaxUSDInFlight; got != 0 {
+			t.Errorf("Budget.MaxUSDInFlight = %v, want 0", got)
+		}
+	})
+
+	t.Run("equal to max_usd_per_run passes validation", func(t *testing.T) {
+		t.Parallel()
+
+		path := writeConfig(t, strings.Replace(baseYAML,
+			"budget:\n  max_usd_per_run: 5\n",
+			"budget:\n  max_usd_per_run: 5\n  max_usd_in_flight: 5\n",
+			1))
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load(%q) error = %v, want nil", path, err)
+		}
+		if got := cfg.Budget.MaxUSDInFlight; got != 5 {
+			t.Errorf("Budget.MaxUSDInFlight = %v, want 5", got)
 		}
 	})
 }
