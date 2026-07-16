@@ -1,7 +1,7 @@
 ---
 id: US-0012
 title: Concurrent task dispatch (runner pool slice)
-status: in-progress
+status: done
 owner: baodq97
 date: 2026-07-16
 priority: P2
