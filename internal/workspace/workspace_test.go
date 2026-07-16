@@ -178,6 +178,46 @@ func TestProvision_ConcurrentSameRepoWarmMirrorNoRace(t *testing.T) {
 	}
 }
 
+// TestProvision_RefreshKeepsPriorTaskBranches proves a second Provision against a
+// warm mirror does not delete the branch an earlier task's worktree is still
+// checked out on. The mirror is a `git clone --mirror` (+refs/*:refs/*), so a
+// pruning refresh fetch deletes every ref the origin lacks — including
+// refs/heads/mandat/<id>, the per-task worktree branches no origin ever has.
+// Losing a live worktree's branch mid-run either fails its `read-tree HEAD`
+// (setup_failed) or leaves it on an unborn HEAD so the agent's commit becomes a
+// parentless root commit carrying the whole tree. The check is sequential because
+// the deletion is deterministic on the second Provision's fetch, not a race:
+// concurrency only decides which of the two symptoms surfaces (US-0012 AC-12.2).
+func TestProvision_RefreshKeepsPriorTaskBranches(t *testing.T) {
+	t.Parallel()
+
+	origin := newBareOrigin(t)
+	mirrorDir := filepath.Join(t.TempDir(), "mirror.git")
+	tasksRoot := t.TempDir()
+	remit := task.Remit{Repo: "mandat", BaseBranch: "main", Paths: []string{"cmd/mandat/", "internal/buildinfo/"}}
+
+	first, err := Provision(context.Background(), Config{RepoURL: origin, MirrorDir: mirrorDir, TasksRoot: tasksRoot, TaskID: "ado-baodo0220-first", Remit: remit})
+	if err != nil {
+		t.Fatalf("first Provision() error = %v, want nil", err)
+	}
+
+	// A second task provisions against the now-warm mirror; its refresh fetch runs
+	// and must not prune the first task's branch out from under its open worktree.
+	if _, err := Provision(context.Background(), Config{RepoURL: origin, MirrorDir: mirrorDir, TasksRoot: tasksRoot, TaskID: "ado-baodo0220-second", Remit: remit}); err != nil {
+		t.Fatalf("second Provision() error = %v, want nil", err)
+	}
+
+	// The first worktree must still resolve HEAD: a pruned branch leaves it unborn,
+	// which is exactly what turns the agent's next commit into an orphan root commit.
+	out, err := runGit(context.Background(), first.Dir, "rev-parse", "--verify", "HEAD")
+	if err != nil {
+		t.Fatalf("first worktree HEAD no longer resolves after a sibling Provision: %v; its branch %q was pruned by the refresh fetch", err, first.Branch)
+	}
+	if strings.TrimSpace(out) == "" {
+		t.Fatalf("first worktree HEAD resolved to empty after a sibling Provision")
+	}
+}
+
 func TestProvision_ConcurrentDifferentReposDoNotShareALock(t *testing.T) {
 	t.Parallel()
 
@@ -235,7 +275,7 @@ func TestMirrorLock_PerDirRegistry(t *testing.T) {
 func TestGitCredArgs(t *testing.T) {
 	t.Parallel()
 
-	args := []string{"fetch", "--prune"}
+	args := []string{"fetch"}
 
 	got := gitCredArgs("", args...)
 	if len(got) != len(args) {
@@ -249,7 +289,7 @@ func TestGitCredArgs(t *testing.T) {
 
 	helper := "!mandat git-credential --role dev"
 	got = gitCredArgs(helper, args...)
-	want := []string{"-c", "credential.helper=" + helper, "fetch", "--prune"}
+	want := []string{"-c", "credential.helper=" + helper, "fetch"}
 	if len(got) != len(want) {
 		t.Fatalf("gitCredArgs(%q, ...) = %v, want %v", helper, got, want)
 	}

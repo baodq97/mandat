@@ -326,8 +326,18 @@ func ensureMirror(ctx context.Context, repoURL, mirrorDir, credHelper string) er
 		return &SetupError{Op: "mirror", Err: err}
 	}
 
+	// Refresh WITHOUT --prune. The mirror's refspec is +refs/*:refs/* (git clone
+	// --mirror), so a pruning fetch deletes every local ref the origin lacks — which
+	// includes the per-task worktree branches refs/heads/mandat/<taskID> that
+	// Provision creates and no origin ever has. When a second task provisions against
+	// this warm mirror, its prune deletes a live sibling's branch: if it lands before
+	// that sibling's `read-tree HEAD`, the sibling fails setup (needs-human); if it
+	// lands after, the sibling runs on an unborn HEAD and the agent's commit becomes a
+	// parentless root commit carrying the whole tree (both observed live at pool>1).
+	// A non-pruning fetch force-updates the shared origin branches and never touches
+	// the task branches; stale deleted-origin branches in the cache are not worth that.
 	if existed {
-		if _, err := runGit(ctx, mirrorDir, gitCredArgs(credHelper, "fetch", "--prune")...); err != nil {
+		if _, err := runGit(ctx, mirrorDir, gitCredArgs(credHelper, "fetch")...); err != nil {
 			return &SetupError{Op: "mirror", Err: err}
 		}
 	}

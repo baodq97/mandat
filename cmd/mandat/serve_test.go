@@ -608,6 +608,16 @@ func TestDispatchCycle_PoolBoundsConcurrency(t *testing.T) {
 		}
 		if got.State != task.StateInReview {
 			t.Errorf("task %s state = %q, want %q", tc.ID, got.State, task.StateInReview)
+			// A task that settled off the happy path went there for a journaled
+			// reason (a setup_failed detail carries the git error text); dump the
+			// hold event so a flake surfaces its mechanism instead of just its state.
+			if events, evErr := deps.Store.Events(ctx, tc.ID); evErr == nil {
+				for i := range events {
+					if events[i].ToState == string(task.StateNeedsHuman) {
+						t.Logf("task %s held: act=%s from=%s detail=%s", tc.ID, events[i].Act, events[i].FromState, events[i].Detail)
+					}
+				}
+			}
 		}
 	}
 	if got := len(spawner.recordedEnvs()); got != 3 {
