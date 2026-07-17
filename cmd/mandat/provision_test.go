@@ -38,18 +38,24 @@ type fakeGraphServer struct {
 	deleteStatus int
 	deleteBody   string
 
+	userCreateStatus int
+	userCreateBody   string
+
 	blueprintCreateStatus int
 	blueprintCreateBody   string
 	principalCreateStatus int
 	principalCreateBody   string
 }
 
-// recordedPost is one POST the fake saw — its path and body — so a test that
-// issues more than one write (ensure-blueprint POSTs the blueprint then its
-// principal) can assert each body against its endpoint, not just the last.
+// recordedPost is one POST the fake saw — its path, body, and Authorization
+// header — so a test that issues more than one write (ensure-blueprint POSTs the
+// blueprint then its principal; ensure-role POSTs the identity then the user) can
+// assert each body against its endpoint, and prove the ensure-role writes carry
+// the blueprint's client-credential token, not the delegated discovery token.
 type recordedPost struct {
-	path string
-	body string
+	path  string
+	body  string
+	authz string
 }
 
 func (f *fakeGraphServer) start(t *testing.T) *httptest.Server {
@@ -60,7 +66,7 @@ func (f *fakeGraphServer) start(t *testing.T) *httptest.Server {
 		f.methods = append(f.methods, r.Method)
 		if r.Method == http.MethodPost {
 			f.postBody = string(reqBody)
-			f.posts = append(f.posts, recordedPost{path: r.URL.Path, body: string(reqBody)})
+			f.posts = append(f.posts, recordedPost{path: r.URL.Path, body: string(reqBody), authz: r.Header.Get("Authorization")})
 		}
 		f.mu.Unlock()
 
@@ -72,6 +78,9 @@ func (f *fakeGraphServer) start(t *testing.T) *httptest.Server {
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/servicePrincipals/microsoft.graph.agentIdentityBlueprintPrincipal"):
 			w.WriteHeader(f.principalCreateStatus)
 			_, _ = w.Write([]byte(f.principalCreateBody))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/users/microsoft.graph.agentUser"):
+			w.WriteHeader(f.userCreateStatus)
+			_, _ = w.Write([]byte(f.userCreateBody))
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/servicePrincipals/microsoft.graph.agentIdentity"):
 			w.WriteHeader(f.createStatus)
 			_, _ = w.Write([]byte(f.createBody))
@@ -677,6 +686,225 @@ func TestProvision_EnsureBlueprint_DryRun_PrintsPlanAndIssuesNoWrites(t *testing
 }
 
 func postBodyForSuffix(t *testing.T, posts []recordedPost, suffix string) string {
+	t.Helper()
+	for _, p := range posts {
+		if strings.HasSuffix(p.path, suffix) {
+			return p.body
+		}
+	}
+	t.Fatalf("no recorded POST with path suffix %q", suffix)
+	return ""
+}
+
+// fakeSTS is a minimal Entra STS: it replies to the client-credentials token
+// request with a canned access_token, so an --ensure-role test proves the write
+// path mints AS the blueprint with no login.microsoftonline.com dial.
+func fakeSTS(t *testing.T, token string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"` + token + `"}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+const blueprintCCToken = "blueprint-cc-token"
+
+func TestProvision_EnsureRole_CreatesIdentityAndUserAsBlueprint(t *testing.T) {
+	swapGraphTokenSource(t, func(context.Context) (string, error) { return fakeGraphToken, nil })
+	swapDeriveSponsor(t, func(context.Context, string) (string, error) { return "sponsor-signed-in", nil })
+	t.Setenv("MANDAT_TEST_BP_SECRET", "s3cr3t")
+
+	fake := dogfoodGraphServer() // has mandat-spike-dev, so role "mandat-dev" is genuinely absent
+	fake.createStatus = http.StatusCreated
+	fake.createBody = `{"id":"identity-new-01","displayName":"mandat-dev"}`
+	fake.userCreateStatus = http.StatusCreated
+	fake.userCreateBody = `{"id":"user-new-01","displayName":"mandat-dev user","userPrincipalName":"mandat-dev@contoso.onmicrosoft.com","identityParentId":"identity-new-01"}`
+	srv := fake.start(t)
+	sts := fakeSTS(t, blueprintCCToken)
+
+	var stdout, stderr strings.Builder
+	code := provision([]string{
+		"--ensure-role", "mandat-dev",
+		"--blueprint-app-id", "blueprint-appid-01",
+		"--blueprint-tenant", "tenant-01",
+		"--blueprint-secret-env", "MANDAT_TEST_BP_SECRET",
+		"--upn-domain", "contoso.onmicrosoft.com",
+		"--graph-url", srv.URL,
+		"--authority-url", sts.URL,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("provision() code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+
+	out := stdout.String()
+	for _, want := range []string{"created agent identity", "identity-new-01", "created agent user", "user-new-01"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n%s", want, out)
+		}
+	}
+
+	// Both writes go AS the blueprint (the client-credential token), never the
+	// delegated discovery token — the writer≠scorer IAM split, in code.
+	posts := fake.recordedPosts()
+	if len(posts) != 2 {
+		t.Fatalf("POSTs = %d, want 2 (identity then user)", len(posts))
+	}
+	for _, p := range posts {
+		if p.authz != "Bearer "+blueprintCCToken {
+			t.Errorf("POST %s authz = %q, want the blueprint client-cred token", p.path, p.authz)
+		}
+		if strings.Contains(p.authz, fakeGraphToken) {
+			t.Errorf("POST %s carried the delegated discovery token, want the blueprint token", p.path)
+		}
+	}
+
+	idBody := postBodyBySuffix(t, posts, "/servicePrincipals/microsoft.graph.agentIdentity")
+	if !strings.Contains(idBody, `"agentIdentityBlueprintId":"blueprint-appid-01"`) {
+		t.Errorf("identity POST body missing the blueprint appId from --blueprint-app-id\n%s", idBody)
+	}
+	userBody := postBodyBySuffix(t, posts, "/users/microsoft.graph.agentUser")
+	for _, want := range []string{`"userPrincipalName":"mandat-dev@contoso.onmicrosoft.com"`, `"identityParentId":"identity-new-01"`} {
+		if !strings.Contains(userBody, want) {
+			t.Errorf("user POST body missing %q\n%s", want, userBody)
+		}
+	}
+}
+
+func TestProvision_EnsureRole_ReusesExistingWithoutWrite(t *testing.T) {
+	swapGraphTokenSource(t, func(context.Context) (string, error) { return fakeGraphToken, nil })
+	swapDeriveSponsor(t, func(context.Context, string) (string, error) { return "sponsor-signed-in", nil })
+	t.Setenv("MANDAT_TEST_BP_SECRET", "s3cr3t")
+
+	// A registry where role "mandat-dev" and its paired user already exist.
+	fake := &fakeGraphServer{
+		blueprintsBody: `{"value":[{"id":"bp-object-01","appId":"appid-blueprint-01","displayName":"mandat-spike-blueprint"}]}`,
+		identitiesBody: `{"value":[{"id":"identity-dev-01","displayName":"mandat-dev"}]}`,
+		usersBody:      `{"value":[{"id":"user-dev-01","displayName":"mandat-dev user","userPrincipalName":"mandat-dev@contoso.onmicrosoft.com","identityParentId":"identity-dev-01"}]}`,
+	}
+	srv := fake.start(t)
+	sts := fakeSTS(t, blueprintCCToken)
+
+	var stdout, stderr strings.Builder
+	code := provision([]string{
+		"--ensure-role", "mandat-dev",
+		"--blueprint-app-id", "blueprint-appid-01",
+		"--blueprint-tenant", "tenant-01",
+		"--blueprint-secret-env", "MANDAT_TEST_BP_SECRET",
+		"--upn-domain", "contoso.onmicrosoft.com",
+		"--graph-url", srv.URL,
+		"--authority-url", sts.URL,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("provision() code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "reused existing agent identity") || !strings.Contains(out, "reused existing agent user") {
+		t.Errorf("output missing the reuse report\n%s", out)
+	}
+	for _, m := range fake.recordedMethods() {
+		if m == http.MethodPost {
+			t.Errorf("issued a POST on the full-reuse path, want none (methods: %v)", fake.recordedMethods())
+		}
+	}
+}
+
+func TestProvision_EnsureRole_DryRun_PrintsPlanAndIssuesNoWrites(t *testing.T) {
+	swapGraphTokenSource(t, func(context.Context) (string, error) { return fakeGraphToken, nil })
+	swapDeriveSponsor(t, func(context.Context, string) (string, error) { return "sponsor-signed-in", nil })
+	t.Setenv("MANDAT_TEST_BP_SECRET", "s3cr3t")
+
+	fake := dogfoodGraphServer()
+	srv := fake.start(t)
+	sts := fakeSTS(t, blueprintCCToken)
+
+	var stdout, stderr strings.Builder
+	code := provision([]string{
+		"--ensure-role", "mandat-dev",
+		"--blueprint-app-id", "blueprint-appid-01",
+		"--blueprint-tenant", "tenant-01",
+		"--blueprint-secret-env", "MANDAT_TEST_BP_SECRET",
+		"--upn-domain", "contoso.onmicrosoft.com",
+		"--graph-url", srv.URL,
+		"--authority-url", sts.URL,
+		"--dry-run",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("provision() code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "WRITE (identity") || !strings.Contains(out, "WRITE (user") {
+		t.Errorf("dry-run missing the WRITE previews\n%s", out)
+	}
+	if !strings.Contains(out, "PLAN (dry-run, no write)") {
+		t.Errorf("dry-run missing the PLAN lines\n%s", out)
+	}
+	for _, m := range fake.recordedMethods() {
+		if m == http.MethodPost {
+			t.Errorf("dry-run issued a POST, want none (methods: %v)", fake.recordedMethods())
+		}
+	}
+}
+
+func TestProvision_EnsureRole_MissingSecret_Errors(t *testing.T) {
+	swapGraphTokenSource(t, func(context.Context) (string, error) { return fakeGraphToken, nil })
+
+	fake := dogfoodGraphServer()
+	srv := fake.start(t)
+
+	var stdout, stderr strings.Builder
+	code := provision([]string{
+		"--ensure-role", "mandat-dev",
+		"--blueprint-app-id", "blueprint-appid-01",
+		"--blueprint-tenant", "tenant-01",
+		"--upn-domain", "contoso.onmicrosoft.com",
+		"--sponsor", "sponsor-explicit",
+		"--graph-url", srv.URL,
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("provision() code = 0, want non-zero when no blueprint secret is given")
+	}
+	if !strings.Contains(stderr.String(), "blueprint secret") {
+		t.Errorf("stderr missing the missing-secret guidance\n%s", stderr.String())
+	}
+}
+
+func TestProvision_EnsureRole_UserForbidden_PrintsConsentGuidance(t *testing.T) {
+	swapGraphTokenSource(t, func(context.Context) (string, error) { return fakeGraphToken, nil })
+	swapDeriveSponsor(t, func(context.Context, string) (string, error) { return "sponsor-signed-in", nil })
+	t.Setenv("MANDAT_TEST_BP_SECRET", "s3cr3t")
+
+	fake := dogfoodGraphServer()
+	fake.createStatus = http.StatusCreated
+	fake.createBody = `{"id":"identity-new-01","displayName":"mandat-dev"}`
+	fake.userCreateStatus = http.StatusForbidden
+	fake.userCreateBody = `{"error":{"code":"Authorization_RequestDenied"}}`
+	srv := fake.start(t)
+	sts := fakeSTS(t, blueprintCCToken)
+
+	var stdout, stderr strings.Builder
+	code := provision([]string{
+		"--ensure-role", "mandat-dev",
+		"--blueprint-app-id", "blueprint-appid-01",
+		"--blueprint-tenant", "tenant-01",
+		"--blueprint-secret-env", "MANDAT_TEST_BP_SECRET",
+		"--upn-domain", "contoso.onmicrosoft.com",
+		"--graph-url", srv.URL,
+		"--authority-url", sts.URL,
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("provision() code = 0, want non-zero on a 403 user create")
+	}
+	if !strings.Contains(stderr.String(), "AgentIdUser.ReadWrite.IdentityParentedBy") {
+		t.Errorf("stderr missing the consent guidance for the user-create permission\n%s", stderr.String())
+	}
+}
+
+// postBodyBySuffix returns the recorded POST body whose path ends with suffix.
+func postBodyBySuffix(t *testing.T, posts []recordedPost, suffix string) string {
 	t.Helper()
 	for _, p := range posts {
 		if strings.HasSuffix(p.path, suffix) {

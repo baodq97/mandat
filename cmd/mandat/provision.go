@@ -101,6 +101,13 @@ func provision(args []string, stdout, stderr io.Writer) int {
 	ensureBlueprint := fs.String("ensure-blueprint", "", "idempotently ensure the installation's agent-identity blueprint (and its principal) with this displayName exists; prints the POST(s) before issuing them (needs the Agent ID Developer/Administrator role)")
 	sponsor := fs.String("sponsor", "", "sponsor object id(s) for a created agent identity (comma-separated); default = the signed-in az user (pass this explicitly when --subscription pins an account other than your active az login, since az ad signed-in-user follows the login context)")
 	subscription := fs.String("subscription", "", "az account/subscription id to pin every az mint to (Graph token via --subscription, sponsor lookup); default = the active az account (az account show --query id)")
+	ensureRole := fs.String("ensure-role", "", "idempotently ensure a role's full agent identity + paired user under the blueprint, created AS the blueprint (its own client-credential token: no operator standing privilege). The arg is the identity displayName; the user gets <role>@<--upn-domain>. Needs --blueprint-app-id, --blueprint-tenant, --upn-domain, and one of --blueprint-secret-env/--blueprint-secret-file")
+	blueprintAppID := fs.String("blueprint-app-id", "", "the blueprint's appId — the client_id the client-credential token is minted for, and the agentIdentityBlueprintId the identity is created under (--ensure-role)")
+	blueprintTenant := fs.String("blueprint-tenant", "", "the tenant the blueprint lives in — the token endpoint the client-credential token is minted against (--ensure-role)")
+	blueprintSecretEnv := fs.String("blueprint-secret-env", "", "name of the environment variable holding the blueprint client secret; the value is read at mint time and never written to disk (--ensure-role). Mutually exclusive with --blueprint-secret-file")
+	blueprintSecretFile := fs.String("blueprint-secret-file", "", "path to a file holding the blueprint client secret (the systemd LoadCredential= delivery); read at mint time, never written elsewhere (--ensure-role). Mutually exclusive with --blueprint-secret-env")
+	upnDomain := fs.String("upn-domain", "", "verified tenant domain for a created agent user's userPrincipalName, e.g. contoso.onmicrosoft.com (--ensure-role)")
+	authorityURL := fs.String("authority-url", "", "override the Entra STS authority base URL for the client-credential mint (test seam)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -124,6 +131,15 @@ func provision(args []string, stdout, stderr io.Writer) int {
 		return runEnsureBlueprint(ctx, client, *ensureBlueprint, *sponsor, resolvedAccount, *dryRun, stdout, stderr)
 	case *ensureIdentity != "":
 		return runEnsureIdentity(ctx, client, *ensureIdentity, *sponsor, resolvedAccount, *dryRun, stdout, stderr)
+	case *ensureRole != "":
+		cred := blueprintCred{
+			appID:        *blueprintAppID,
+			tenant:       *blueprintTenant,
+			secretEnv:    *blueprintSecretEnv,
+			secretFile:   *blueprintSecretFile,
+			authorityURL: *authorityURL,
+		}
+		return runEnsureRole(ctx, client, cred, *graphURL, *ensureRole, *sponsor, resolvedAccount, *upnDomain, *dryRun, stdout, stderr)
 	}
 
 	reg, err := client.DiscoverRegistry(ctx)
@@ -280,6 +296,167 @@ func runEnsureBlueprint(ctx context.Context, client *entra.Client, displayName, 
 		fmt.Fprintf(stdout, "reused existing agent-identity blueprint %q (appId %s); no write issued.\n", bp.DisplayName, bp.AppID)
 	}
 	return 0
+}
+
+// blueprintCred names how the blueprint proves itself for a client-credential
+// mint: its appId, its tenant, and the reference (env var name or file path) to a
+// secret read only at mint time. It never carries the secret value itself —
+// config records a reference, not a secret (US-0014 AC-14.8). authorityURL is a
+// test seam pointing the mint at a fake STS.
+type blueprintCred struct {
+	appID        string
+	tenant       string
+	secretEnv    string
+	secretFile   string
+	authorityURL string
+}
+
+// tokenSource builds the blueprint's client-credential Graph token source from
+// the credential reference: exactly one of --blueprint-secret-env or
+// --blueprint-secret-file supplies the secret provider. The provider is invoked
+// per mint (a rotated secret is picked up without restart) and the value is never
+// retained.
+func (b blueprintCred) tokenSource() (entra.TokenSource, error) {
+	var secret func(ctx context.Context) (string, error)
+	switch {
+	case b.secretEnv != "" && b.secretFile != "":
+		return nil, errors.New("pass only one of --blueprint-secret-env / --blueprint-secret-file")
+	case b.secretEnv != "":
+		secret = entra.SecretFromEnv(b.secretEnv)
+	case b.secretFile != "":
+		secret = entra.SecretFromFile(b.secretFile)
+	default:
+		return nil, errors.New("--ensure-role needs a blueprint secret: --blueprint-secret-env or --blueprint-secret-file")
+	}
+	return entra.ClientCredentialTokenSource(entra.ClientCredentialConfig{
+		TenantID:         b.tenant,
+		ClientID:         b.appID,
+		Credential:       entra.SecretCredential{Secret: secret},
+		AuthorityBaseURL: b.authorityURL,
+	})
+}
+
+// runEnsureRole runs US-0014's full ensure-role-identity ladder for one role AS
+// the blueprint (AC-14.3): it creates the agent identity and its paired agent user
+// under the owned blueprint using the blueprint's OWN client-credential token, so
+// no operator standing privilege is required — the blueprint acts on its consented
+// application permissions (intrinsic CreateAsManager for the identity,
+// AgentIdUser.ReadWrite.IdentityParentedBy for the user), proven live against the
+// dogfood tenant 2026-07-17. Existence is checked through the operator's delegated
+// discovery client (idempotency), the writes go through the client-credential
+// client, and the user create carries the retry-backoff over the create→use lag
+// (AC-14.5). Every POST is printed before it is issued (AC-14.7); --dry-run prints
+// the plan and issues zero writes (AC-14.6).
+func runEnsureRole(ctx context.Context, delegated *entra.Client, cred blueprintCred, graphURL, role, sponsorFlag, accountID, upnDomain string, dryRun bool, stdout, stderr io.Writer) int {
+	if cred.appID == "" || cred.tenant == "" {
+		fmt.Fprintln(stderr, "mandat provision: --ensure-role needs --blueprint-app-id and --blueprint-tenant (the blueprint mints its own client-credential token).")
+		return 1
+	}
+	if strings.TrimSpace(upnDomain) == "" {
+		fmt.Fprintln(stderr, "mandat provision: --ensure-role needs --upn-domain (the verified tenant domain for the agent user's UPN).")
+		return 1
+	}
+	sponsors, err := resolveSponsors(ctx, sponsorFlag, accountID)
+	if err != nil {
+		fmt.Fprintf(stderr, "mandat provision: resolve sponsor: %v\n", err)
+		return 1
+	}
+	ccSource, err := cred.tokenSource()
+	if err != nil {
+		fmt.Fprintf(stderr, "mandat provision: %v\n", err)
+		return 1
+	}
+	cc, err := entra.New(entra.Config{GraphBaseURL: graphURL, TokenSource: ccSource})
+	if err != nil {
+		fmt.Fprintf(stderr, "mandat provision: %v\n", err)
+		return 1
+	}
+
+	// Existence check via the operator's delegated session (the reuse path), so
+	// the ladder stays idempotent without asking the blueprint token to list.
+	reg, err := delegated.DiscoverRegistry(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "mandat provision: discover Entra Agent-ID registry: %v\n", err)
+		return 1
+	}
+
+	identity, haveIdentity := entra.AgentIdentity{}, false
+	for _, id := range reg.Identities {
+		if id.DisplayName == role {
+			identity, haveIdentity = id, true
+			break
+		}
+	}
+
+	idCall, err := cc.AgentIdentityCreateCall(cred.appID, role, sponsors)
+	if err != nil {
+		fmt.Fprintf(stderr, "mandat provision: %v\n", err)
+		return 1
+	}
+	userSpec := entra.AgentUserSpec{DisplayName: role + " user", MailNickname: role, UserPrincipalName: role + "@" + upnDomain}
+
+	// AC-14.7: print both mutations before any is issued.
+	fmt.Fprintf(stdout, "WRITE (identity, issued only if absent, AS the blueprint): %s %s\n    body: %s\n", idCall.Method, idCall.Endpoint, idCall.Body)
+	planParent := identity.ID
+	if !haveIdentity {
+		planParent = "<agent-identity-id-from-the-identity-create-above>"
+	}
+	planSpec := userSpec
+	planSpec.IdentityID = planParent
+	if userCall, err := cc.AgentUserCreateCall(planSpec); err == nil {
+		fmt.Fprintf(stdout, "WRITE (user, issued only if absent, AS the blueprint): %s %s\n    body: %s\n", userCall.Method, userCall.Endpoint, userCall.Body)
+	}
+
+	if dryRun {
+		if haveIdentity {
+			fmt.Fprintf(stdout, "PLAN (dry-run, no write): identity %q exists (id %s); ensure would reuse it.\n", role, identity.ID)
+		} else {
+			fmt.Fprintf(stdout, "PLAN (dry-run, no write): identity %q absent; ensure would issue the identity POST above.\n", role)
+		}
+		fmt.Fprintln(stdout, "PLAN (dry-run, no write): the user POST above follows once the identity id is known. Issued zero writes.")
+		return 0
+	}
+
+	if !haveIdentity {
+		identity, err = cc.CreateAgentIdentity(ctx, cred.appID, role, sponsors)
+		if err != nil {
+			return handleWriteErr(stderr, fmt.Sprintf("create identity %q", role), err,
+				"the blueprint client-credential could not create the identity; confirm the blueprint appId/tenant/secret and that the app is an agent-identity blueprint principal.")
+		}
+		fmt.Fprintf(stdout, "created agent identity %q (id %s) AS the blueprint.\n", identity.DisplayName, identity.ID)
+	} else {
+		fmt.Fprintf(stdout, "reused existing agent identity %q (id %s); no write issued.\n", identity.DisplayName, identity.ID)
+	}
+
+	for _, u := range reg.Users {
+		if u.IdentityParentID != "" && u.IdentityParentID == identity.ID {
+			fmt.Fprintf(stdout, "reused existing agent user %q (id %s); no write issued.\n", u.UserPrincipalName, u.ID)
+			return 0
+		}
+	}
+
+	userSpec.IdentityID = identity.ID
+	user, err := cc.CreateAgentUser(ctx, userSpec, entra.RetryPolicy{})
+	if err != nil {
+		return handleWriteErr(stderr, fmt.Sprintf("create user %q", userSpec.UserPrincipalName), err,
+			"consent AgentIdUser.ReadWrite.IdentityParentedBy (appRole 4aa6e624-eee0-40ab-bdd8-f9639038a614) on the blueprint via admin-consent, then retry.")
+	}
+	fmt.Fprintf(stdout, "created agent user %q (id %s) parented to the identity AS the blueprint.\n", user.UserPrincipalName, user.ID)
+	return 0
+}
+
+// handleWriteErr renders a failed Graph write: a *PrivilegeError (403) prints the
+// typed message plus an actionable consent/fix hint and exits non-zero-but-clean
+// (never a raw 403 dump, AC-14.4); any other error prints what failed.
+func handleWriteErr(stderr io.Writer, what string, err error, fixHint string) int {
+	var privErr *entra.PrivilegeError
+	if errors.As(err, &privErr) {
+		fmt.Fprintf(stderr, "mandat provision: %v\n", privErr)
+		fmt.Fprintf(stderr, "  Fix: %s\n", fixHint)
+		return 1
+	}
+	fmt.Fprintf(stderr, "mandat provision: %s: %v\n", what, err)
+	return 1
 }
 
 // resolveSponsors returns the sponsor object ids for a created agent identity:

@@ -96,11 +96,19 @@ separation the CLI survey documents (patterns 1, 11).
       Developer or Administrator role, observe the command fails before issuing any write,
       with an error naming the specific missing role.
 - [ ] AC-14.3 Given a role's agent identity and paired agent user already exist under the
-      owned blueprint, observe `ensure-role-identity` for that role creates nothing and
-      reports the existing identity and user ids. Given they do not exist, observe it creates
-      the agent identity under the owned blueprint (no Agent ID role required for this step)
-      and then creates the paired agent user using the blueprint's own client-credential
-      token, not a delegated operator token.
+      owned blueprint, observe `mandat provision --ensure-role <name>` for that role creates
+      nothing and reports the existing identity and user ids. Given they do not exist, observe
+      it creates both the agent identity and the paired agent user using the blueprint's own
+      client-credential token, not a delegated operator token — the blueprint acts on its own
+      consented application permissions (intrinsic `AgentIdentity.CreateAsManager` for the
+      identity, `AgentIdUser.ReadWrite.IdentityParentedBy` for the user), so no operator
+      standing privilege is required. Shipped and proven live 2026-07-17 against the dogfood
+      tenant (`docs/research/init-provision-pilot.md`): the blueprint minted its own token and
+      created a `ServiceIdentity` SP + a `#microsoft.graph.agentUser` parented to it, both
+      independently verified via a delegated read. Existence is checked through the operator's
+      delegated discovery (idempotency); only the writes go through the client-credential
+      token. `AgentIdentity.CreateAsManager` cannot be explicitly granted to a blueprint
+      principal (it is intrinsic), correcting the earlier premise that it needed consent.
 - [ ] AC-14.4 Given the operator's session lacks admin-consent rights for the ADO
       `oauth2PermissionGrant` step, or lacks ADO org-admin rights for the entitlement/group
       step, observe `ensure-role-identity` does not fail opaquely: it prints the exact call
@@ -162,6 +170,12 @@ story.
   which the research doc still ties to the privileged Agent ID Developer/Administrator
   role. The remaining spike narrows from "the whole ladder's least-priv scope" to just the
   blueprint-creation step.
-- UPN domain selection for the agent user (which verified tenant domain to use) is flagged as
-  open in the research doc and is not resolved here. It may need its own picker in
-  `ensure-role-identity`, or may be safe to default; undetermined until the spike above runs.
+- UPN domain selection for the agent user is now resolved by an explicit required
+  `--upn-domain` flag on `--ensure-role`: the operator supplies the verified tenant domain
+  (e.g. `contoso.onmicrosoft.com`) and the user's userPrincipalName is `<role>@<domain>`.
+  Auto-deriving the domain from the tenant's default verified domain remains a follow-up, not
+  a blocker — an explicit flag is the honest MVP.
+- Still open for a complete ladder (not covered by the `--ensure-role` slice): AC-14.1
+  ensure-auth (`az login` drive) and AC-14.4's ADO steps 6–7 (the `oauth2PermissionGrant`
+  admin consent and the ADO entitlement/group add). `--ensure-role` covers the Graph identity
+  + user creation only; the ADO grant/entitlement steps are not yet wired.
