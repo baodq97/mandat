@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +27,7 @@ type fakeGraphServer struct {
 	mu       sync.Mutex
 	methods  []string
 	postBody string
+	posts    []recordedPost
 
 	blueprintsBody string
 	identitiesBody string
@@ -35,6 +37,19 @@ type fakeGraphServer struct {
 	createBody   string
 	deleteStatus int
 	deleteBody   string
+
+	blueprintCreateStatus int
+	blueprintCreateBody   string
+	principalCreateStatus int
+	principalCreateBody   string
+}
+
+// recordedPost is one POST the fake saw — its path and body — so a test that
+// issues more than one write (ensure-blueprint POSTs the blueprint then its
+// principal) can assert each body against its endpoint, not just the last.
+type recordedPost struct {
+	path string
+	body string
 }
 
 func (f *fakeGraphServer) start(t *testing.T) *httptest.Server {
@@ -45,11 +60,18 @@ func (f *fakeGraphServer) start(t *testing.T) *httptest.Server {
 		f.methods = append(f.methods, r.Method)
 		if r.Method == http.MethodPost {
 			f.postBody = string(reqBody)
+			f.posts = append(f.posts, recordedPost{path: r.URL.Path, body: string(reqBody)})
 		}
 		f.mu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/applications/microsoft.graph.agentIdentityBlueprint"):
+			w.WriteHeader(f.blueprintCreateStatus)
+			_, _ = w.Write([]byte(f.blueprintCreateBody))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/servicePrincipals/microsoft.graph.agentIdentityBlueprintPrincipal"):
+			w.WriteHeader(f.principalCreateStatus)
+			_, _ = w.Write([]byte(f.principalCreateBody))
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/servicePrincipals/microsoft.graph.agentIdentity"):
 			w.WriteHeader(f.createStatus)
 			_, _ = w.Write([]byte(f.createBody))
@@ -84,6 +106,14 @@ func (f *fakeGraphServer) recordedPostBody() string {
 	return f.postBody
 }
 
+func (f *fakeGraphServer) recordedPosts() []recordedPost {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]recordedPost, len(f.posts))
+	copy(out, f.posts)
+	return out
+}
+
 // dogfoodGraphServer seeds a blueprint and a dev identity paired to a dev user,
 // but no reviewer identity — so the reuse report lists a paired identity and the
 // dry-run plan has a genuinely-absent role to plan the create for.
@@ -95,21 +125,37 @@ func dogfoodGraphServer() *fakeGraphServer {
 	}
 }
 
-// swapGraphTokenSource installs src as provision's token source for the test's
-// duration. A test that swaps it runs non-parallel: graphTokenSource is package
-// state and -race rejects a concurrent write.
+// swapGraphTokenSource installs src as the token source provision's factory
+// returns for the test's duration, and stubs the az-account derivation so building
+// the pinned client needs no az session. A test that swaps it runs non-parallel:
+// graphTokenSource and deriveProvisionAccount are package state and -race rejects
+// a concurrent write.
 func swapGraphTokenSource(t *testing.T, src entra.TokenSource) {
 	t.Helper()
-	saved := graphTokenSource
-	graphTokenSource = src
-	t.Cleanup(func() { graphTokenSource = saved })
+	savedFactory := graphTokenSource
+	graphTokenSource = func(string) entra.TokenSource { return src }
+	t.Cleanup(func() { graphTokenSource = savedFactory })
+
+	savedAccount := deriveProvisionAccount
+	deriveProvisionAccount = func(context.Context) (string, error) { return "test-account", nil }
+	t.Cleanup(func() { deriveProvisionAccount = savedAccount })
+}
+
+// swapProvisionAccount installs fn as provision's az-account-derivation seam for
+// the test's duration, so a test drives the default-derive path with no az
+// shellout. Non-parallel for the same reason as swapGraphTokenSource.
+func swapProvisionAccount(t *testing.T, fn func(context.Context) (string, error)) {
+	t.Helper()
+	saved := deriveProvisionAccount
+	deriveProvisionAccount = fn
+	t.Cleanup(func() { deriveProvisionAccount = saved })
 }
 
 // swapDeriveSponsor installs fn as provision's sponsor derivation for the test's
 // duration, so an ensure test resolves the default sponsor with no az shellout.
 // Like swapGraphTokenSource it mutates package state, so its callers run
 // non-parallel.
-func swapDeriveSponsor(t *testing.T, fn func(context.Context) (string, error)) {
+func swapDeriveSponsor(t *testing.T, fn func(context.Context, string) (string, error)) {
 	t.Helper()
 	saved := deriveSponsor
 	deriveSponsor = fn
@@ -218,7 +264,7 @@ func TestProvision_TokenSourceFailure_ExitsNonZero(t *testing.T) {
 
 func TestProvision_EnsureIdentity_ReusesExisting(t *testing.T) {
 	swapGraphTokenSource(t, func(context.Context) (string, error) { return fakeGraphToken, nil })
-	swapDeriveSponsor(t, func(context.Context) (string, error) { return "sponsor-signed-in", nil })
+	swapDeriveSponsor(t, func(context.Context, string) (string, error) { return "sponsor-signed-in", nil })
 
 	fake := dogfoodGraphServer()
 	srv := fake.start(t)
@@ -246,7 +292,7 @@ func TestProvision_EnsureIdentity_ReusesExisting(t *testing.T) {
 
 func TestProvision_EnsureIdentity_CreatesAbsent(t *testing.T) {
 	swapGraphTokenSource(t, func(context.Context) (string, error) { return fakeGraphToken, nil })
-	swapDeriveSponsor(t, func(context.Context) (string, error) { return "sponsor-signed-in", nil })
+	swapDeriveSponsor(t, func(context.Context, string) (string, error) { return "sponsor-signed-in", nil })
 
 	fake := dogfoodGraphServer()
 	fake.createStatus = http.StatusCreated
@@ -292,7 +338,7 @@ func TestProvision_EnsureIdentity_CreatesAbsent(t *testing.T) {
 
 func TestProvision_EnsureIdentity_DryRun_PrintsPlanAndIssuesNoWrites(t *testing.T) {
 	swapGraphTokenSource(t, func(context.Context) (string, error) { return fakeGraphToken, nil })
-	swapDeriveSponsor(t, func(context.Context) (string, error) { return "sponsor-signed-in", nil })
+	swapDeriveSponsor(t, func(context.Context, string) (string, error) { return "sponsor-signed-in", nil })
 
 	fake := dogfoodGraphServer()
 	srv := fake.start(t)
@@ -332,7 +378,7 @@ func TestProvision_EnsureIdentity_DryRun_PrintsPlanAndIssuesNoWrites(t *testing.
 
 func TestProvision_EnsureIdentity_Forbidden_PrintsGuidanceExitsNonZero(t *testing.T) {
 	swapGraphTokenSource(t, func(context.Context) (string, error) { return fakeGraphToken, nil })
-	swapDeriveSponsor(t, func(context.Context) (string, error) { return "sponsor-signed-in", nil })
+	swapDeriveSponsor(t, func(context.Context, string) (string, error) { return "sponsor-signed-in", nil })
 
 	fake := dogfoodGraphServer()
 	fake.createStatus = http.StatusForbidden
@@ -362,7 +408,7 @@ func TestProvision_EnsureIdentity_SponsorOverride(t *testing.T) {
 	swapGraphTokenSource(t, func(context.Context) (string, error) { return fakeGraphToken, nil })
 	// deriveSponsor errors so that a code=0 run proves --sponsor took over: if the
 	// flag were ignored the derivation would fail and abort non-zero.
-	swapDeriveSponsor(t, func(context.Context) (string, error) {
+	swapDeriveSponsor(t, func(context.Context, string) (string, error) {
 		return "", context.DeadlineExceeded
 	})
 
@@ -389,7 +435,7 @@ func TestProvision_EnsureIdentity_SponsorOverride(t *testing.T) {
 
 func TestProvision_EnsureIdentity_NoBlueprint_Errors(t *testing.T) {
 	swapGraphTokenSource(t, func(context.Context) (string, error) { return fakeGraphToken, nil })
-	swapDeriveSponsor(t, func(context.Context) (string, error) { return "sponsor-signed-in", nil })
+	swapDeriveSponsor(t, func(context.Context, string) (string, error) { return "sponsor-signed-in", nil })
 
 	fake := dogfoodGraphServer()
 	fake.blueprintsBody = `{"value":[]}`
@@ -409,4 +455,234 @@ func TestProvision_EnsureIdentity_NoBlueprint_Errors(t *testing.T) {
 			t.Errorf("recorded a POST with no blueprint; the create must not run")
 		}
 	}
+}
+
+// TestProvision_Subscription_PinsGraphMintAndSponsorDerive proves --subscription
+// pins both az mints provision makes: the Graph token-source factory and the
+// sponsor lookup receive the flag value, so neither falls back to az's active
+// account (US-0014 F1). Not parallel: swaps package-var seams.
+func TestProvision_Subscription_PinsGraphMintAndSponsorDerive(t *testing.T) {
+	var gotGraphAccount, gotSponsorAccount string
+	savedFactory := graphTokenSource
+	graphTokenSource = func(accountID string) entra.TokenSource {
+		gotGraphAccount = accountID
+		return func(context.Context) (string, error) { return fakeGraphToken, nil }
+	}
+	t.Cleanup(func() { graphTokenSource = savedFactory })
+	swapDeriveSponsor(t, func(_ context.Context, accountID string) (string, error) {
+		gotSponsorAccount = accountID
+		return "sponsor-signed-in", nil
+	})
+
+	fake := dogfoodGraphServer()
+	fake.createStatus = http.StatusCreated
+	fake.createBody = `{"id":"identity-pilot-99","displayName":"mandat-pilot"}`
+	srv := fake.start(t)
+
+	var stdout, stderr strings.Builder
+	code := provision([]string{"--ensure-identity", "mandat-pilot", "--subscription", "chosen-account", "--graph-url", srv.URL}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("provision() code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+	if gotGraphAccount != "chosen-account" {
+		t.Errorf("Graph mint pinned to account %q, want the --subscription value %q", gotGraphAccount, "chosen-account")
+	}
+	if gotSponsorAccount != "chosen-account" {
+		t.Errorf("sponsor derive pinned to account %q, want the --subscription value %q", gotSponsorAccount, "chosen-account")
+	}
+}
+
+// TestProvision_NoSubscriptionFlag_DerivesAccount proves the default: with no
+// --subscription, provision derives the active az account (deriveProvisionAccount)
+// and pins the Graph mint to it rather than leaving it unpinned. Not parallel:
+// swaps package-var seams.
+func TestProvision_NoSubscriptionFlag_DerivesAccount(t *testing.T) {
+	swapProvisionAccount(t, func(context.Context) (string, error) { return "derived-account", nil })
+	var gotGraphAccount string
+	savedFactory := graphTokenSource
+	graphTokenSource = func(accountID string) entra.TokenSource {
+		gotGraphAccount = accountID
+		return func(context.Context) (string, error) { return fakeGraphToken, nil }
+	}
+	t.Cleanup(func() { graphTokenSource = savedFactory })
+
+	fake := dogfoodGraphServer()
+	srv := fake.start(t)
+
+	var stdout, stderr strings.Builder
+	code := provision([]string{"--graph-url", srv.URL}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("provision() code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+	if gotGraphAccount != "derived-account" {
+		t.Errorf("Graph mint pinned to account %q, want the derived default %q", gotGraphAccount, "derived-account")
+	}
+}
+
+// TestProvision_AccountDeriveFails_ExitsNonZero proves provision refuses to run
+// with no resolvable account and no --subscription, rather than minting an
+// unpinned Graph token against az's active account (US-0014 F1). Not parallel:
+// swaps a package-var seam.
+func TestProvision_AccountDeriveFails_ExitsNonZero(t *testing.T) {
+	swapProvisionAccount(t, func(context.Context) (string, error) { return "", errors.New("az not logged in") })
+
+	var stdout, stderr strings.Builder
+	code := provision([]string{}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("provision() code = 0, want non-zero when no account resolves and none is passed (stdout: %s)", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "account") {
+		t.Errorf("stderr = %q, want an account-resolution diagnostic", stderr.String())
+	}
+}
+
+func TestProvision_EnsureBlueprint_ReusesExisting(t *testing.T) {
+	swapGraphTokenSource(t, func(context.Context) (string, error) { return fakeGraphToken, nil })
+	swapDeriveSponsor(t, func(context.Context, string) (string, error) { return "sponsor-signed-in", nil })
+
+	fake := dogfoodGraphServer()
+	srv := fake.start(t)
+
+	var stdout, stderr strings.Builder
+	code := provision([]string{"--ensure-blueprint", "mandat-blueprint", "--graph-url", srv.URL}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("provision() code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "reused") || !strings.Contains(out, "appid-blueprint-01") {
+		t.Errorf("output missing the reuse report for the existing blueprint\n%s", out)
+	}
+	// Reuse issues no POST: the fake records only GET (the blueprint list read).
+	for _, m := range fake.recordedMethods() {
+		if m != http.MethodGet {
+			t.Errorf("recorded a %s request; reuse must issue only GETs", m)
+		}
+	}
+	if strings.Contains(out, fakeGraphToken) {
+		t.Error("output leaked the Graph token")
+	}
+}
+
+func TestProvision_EnsureBlueprint_CreatesAbsent(t *testing.T) {
+	swapGraphTokenSource(t, func(context.Context) (string, error) { return fakeGraphToken, nil })
+	swapDeriveSponsor(t, func(context.Context, string) (string, error) { return "sponsor-signed-in", nil })
+
+	fake := dogfoodGraphServer()
+	fake.blueprintsBody = `{"value":[]}`
+	fake.blueprintCreateStatus = http.StatusCreated
+	fake.blueprintCreateBody = `{"id":"bp-object-99","appId":"appid-blueprint-99","displayName":"mandat-blueprint"}`
+	fake.principalCreateStatus = http.StatusCreated
+	fake.principalCreateBody = `{"id":"principal-99","appId":"appid-blueprint-99"}`
+	srv := fake.start(t)
+
+	var stdout, stderr strings.Builder
+	code := provision([]string{"--ensure-blueprint", "mandat-blueprint", "--graph-url", srv.URL}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("provision() code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "created") || !strings.Contains(out, "appid-blueprint-99") {
+		t.Errorf("output missing the created-blueprint report\n%s", out)
+	}
+
+	// The absent-blueprint path issues both the blueprint POST (displayName +
+	// sponsors@odata.bind for the derived signed-in user) and the principal POST
+	// (just the appId the blueprint create returned).
+	posts := fake.recordedPosts()
+	blueprintBody := postBodyForSuffix(t, posts, "/applications/microsoft.graph.agentIdentityBlueprint")
+	for _, want := range []string{
+		`"displayName":"mandat-blueprint"`,
+		`"sponsors@odata.bind":[`,
+		"/users/sponsor-signed-in",
+	} {
+		if !strings.Contains(blueprintBody, want) {
+			t.Errorf("blueprint POST body missing %q\n%s", want, blueprintBody)
+		}
+	}
+	principalBody := postBodyForSuffix(t, posts, "/servicePrincipals/microsoft.graph.agentIdentityBlueprintPrincipal")
+	if !strings.Contains(principalBody, `"appId":"appid-blueprint-99"`) {
+		t.Errorf("principal POST body missing the appId from the blueprint create\n%s", principalBody)
+	}
+}
+
+func TestProvision_EnsureBlueprint_Forbidden_PrintsGuidanceExitsNonZero(t *testing.T) {
+	swapGraphTokenSource(t, func(context.Context) (string, error) { return fakeGraphToken, nil })
+	swapDeriveSponsor(t, func(context.Context, string) (string, error) { return "sponsor-signed-in", nil })
+
+	fake := dogfoodGraphServer()
+	fake.blueprintsBody = `{"value":[]}`
+	fake.blueprintCreateStatus = http.StatusForbidden
+	fake.blueprintCreateBody = `{"error":{"code":"Authorization_RequestDenied"}}`
+	srv := fake.start(t)
+
+	var stdout, stderr strings.Builder
+	code := provision([]string{"--ensure-blueprint", "mandat-blueprint", "--graph-url", srv.URL}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("provision() code = 0, want non-zero on a 403 write (stdout: %s)", stdout.String())
+	}
+
+	// Fail-with-guidance (AC-14.2/AC-14.4): the operator sees the 403, the missing
+	// Agent ID role, and the blueprint-scope fix, not a raw 403 dump.
+	errOut := stderr.String()
+	for _, want := range []string{"403", "Agent ID Developer", "AgentIdentityBlueprint.Create"} {
+		if !strings.Contains(errOut, want) {
+			t.Errorf("guidance missing %q\n%s", want, errOut)
+		}
+	}
+	if strings.Contains(stdout.String(), fakeGraphToken) || strings.Contains(errOut, fakeGraphToken) {
+		t.Error("output leaked the Graph token")
+	}
+}
+
+func TestProvision_EnsureBlueprint_DryRun_PrintsPlanAndIssuesNoWrites(t *testing.T) {
+	swapGraphTokenSource(t, func(context.Context) (string, error) { return fakeGraphToken, nil })
+	swapDeriveSponsor(t, func(context.Context, string) (string, error) { return "sponsor-signed-in", nil })
+
+	fake := dogfoodGraphServer()
+	fake.blueprintsBody = `{"value":[]}`
+	srv := fake.start(t)
+
+	var stdout, stderr strings.Builder
+	code := provision([]string{"--ensure-blueprint", "mandat-blueprint", "--dry-run", "--graph-url", srv.URL}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("provision() code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+
+	out := stdout.String()
+	// Both exact POSTs are printed (endpoints + bodies) and marked no-write (AC-14.7).
+	for _, want := range []string{
+		"/applications/microsoft.graph.agentIdentityBlueprint",
+		"/servicePrincipals/microsoft.graph.agentIdentityBlueprintPrincipal",
+		`"displayName":"mandat-blueprint"`,
+		"/users/sponsor-signed-in",
+		"no write",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("dry-run output missing %q\n%s", want, out)
+		}
+	}
+	// Zero writes: every request the dry run made is a GET (the blueprint list read
+	// that predicts create-vs-reuse).
+	methods := fake.recordedMethods()
+	if len(methods) == 0 {
+		t.Fatal("no requests recorded; dry-run must still read to predict create-vs-reuse")
+	}
+	for _, m := range methods {
+		if m != http.MethodGet {
+			t.Errorf("recorded a %s request; --dry-run must issue only GETs", m)
+		}
+	}
+}
+
+func postBodyForSuffix(t *testing.T, posts []recordedPost, suffix string) string {
+	t.Helper()
+	for _, p := range posts {
+		if strings.HasSuffix(p.path, suffix) {
+			return p.body
+		}
+	}
+	t.Fatalf("no recorded POST with path suffix %q", suffix)
+	return ""
 }

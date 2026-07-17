@@ -2,8 +2,9 @@
 // side of the Microsoft Entra Agent ID registry over stdlib net/http: given a
 // Graph bearer token, it enumerates the installation's agent-identity blueprint,
 // the agent identities registered under it, and the agent users, then pairs each
-// user to its identity — and, on the write side, idempotently ensures an agent
-// identity exists (list-then-create) and best-effort deletes a throwaway one.
+// user to its identity — and, on the write side, idempotently ensures the
+// installation's blueprint (create + principal) and the agent identities under
+// it exist (list-then-create) and best-effort deletes a throwaway one.
 //
 // This is the ensure-read half of US-0014's provisioning ladder — the "auto
 // when possible" reuse path that discovers what already exists before any
@@ -16,15 +17,20 @@
 //	GET {graph}/servicePrincipals/microsoft.graph.agentIdentity?$top=100
 //	GET {graph}/users/microsoft.graph.agentUser?$top=100&$select=...
 //
-// The write side issues the create mutation behind EnsureAgentIdentity against
-// the same v1.0 surface (research write-surface step 4):
+// The write side issues the create mutations behind EnsureBlueprint and
+// EnsureAgentIdentity against the same v1.0 surface (research write-surface
+// steps 1-2 and 4):
 //
+//	POST {graph}/applications/microsoft.graph.agentIdentityBlueprint
+//	POST {graph}/servicePrincipals/microsoft.graph.agentIdentityBlueprintPrincipal
 //	POST {graph}/servicePrincipals/microsoft.graph.agentIdentity
 //
 // A write that returns 403 becomes a *PrivilegeError naming the missing
 // capability, so provision fails with guidance instead of a raw 403 (US-0014
 // AC-14.4); every mutation is printable through a WriteCall before it is issued
-// (AC-14.7).
+// (AC-14.7). The blueprint create (steps 1-2) needs the Agent ID Developer or
+// Administrator role, unlike the agent-identity create under an owned blueprint,
+// which needs no Agent ID role.
 //
 // The Graph base URL is overridable through Config so a contract test points the
 // whole chain at one httptest server. The token never lands on the Client: it is
@@ -146,29 +152,42 @@ func (r Registry) PairedUser(identity AgentIdentity) (AgentUser, bool) {
 // init.go's tokenSource seam).
 type TokenSource func(ctx context.Context) (string, error)
 
-// AzureCLIGraphTokenSource is the production TokenSource: it shells out to az
-// for a Graph-scoped bearer token, the same shape as discovery's ADO token
-// source but for the Graph resource. When az is missing or the operator is
-// logged out it fails fast rather than prompting or blocking, so the caller
-// surfaces the auth gap immediately. The token is returned to the in-process
-// caller only and never logged or persisted.
-func AzureCLIGraphTokenSource(ctx context.Context) (string, error) {
-	out, err := exec.CommandContext(ctx, "az", "account", "get-access-token",
-		"--resource", graphResource, "--query", "accessToken", "-o", "tsv").Output()
-	if err != nil {
-		return "", fmt.Errorf("az account get-access-token: %w", err)
+// AzureCLIGraphTokenSource returns the production TokenSource: it shells out to
+// az for a Graph-scoped bearer token pinned to the az account (subscription)
+// accountID, so the mint targets the operator's chosen account without switching
+// az's active login (US-0014 F1). --subscription pins the mint where --tenant
+// cannot: against a non-active tenant, az account get-access-token --tenant
+// demands a fresh interactive login, whereas --subscription <account-id> mints
+// against that account and leaves the active default unchanged (live probe
+// 2026-07-17). An empty accountID omits --subscription: a caller with no resolved
+// account falls back to az's active account, never a broken flag. When az is
+// missing or the operator is logged out it fails fast rather than prompting or
+// blocking, so the caller surfaces the auth gap immediately. The token is
+// returned to the in-process caller only and never logged or persisted.
+func AzureCLIGraphTokenSource(accountID string) TokenSource {
+	return func(ctx context.Context) (string, error) {
+		args := []string{"account", "get-access-token", "--resource", graphResource}
+		if accountID != "" {
+			args = append(args, "--subscription", accountID)
+		}
+		args = append(args, "--query", "accessToken", "-o", "tsv")
+		out, err := exec.CommandContext(ctx, "az", args...).Output()
+		if err != nil {
+			return "", fmt.Errorf("az account get-access-token: %w", err)
+		}
+		token := strings.TrimSpace(string(out))
+		if token == "" {
+			return "", errors.New("az account get-access-token returned no token")
+		}
+		return token, nil
 	}
-	token := strings.TrimSpace(string(out))
-	if token == "" {
-		return "", errors.New("az account get-access-token returned no token")
-	}
-	return token, nil
 }
 
 // Config points a Client at the Graph host and its token source. GraphBaseURL
 // defaults to the production v1.0 host when empty; a test overrides it with an
 // httptest server's URL. HTTPClient defaults to a client with defaultHTTPTimeout
-// when nil; TokenSource defaults to AzureCLIGraphTokenSource when nil.
+// when nil; TokenSource defaults to an unpinned AzureCLIGraphTokenSource when nil
+// (real callers pass one pinned to their resolved az account).
 type Config struct {
 	GraphBaseURL string
 	HTTPClient   *http.Client
@@ -201,7 +220,7 @@ func New(cfg Config) (*Client, error) {
 	}
 	tokens := cfg.TokenSource
 	if tokens == nil {
-		tokens = AzureCLIGraphTokenSource
+		tokens = AzureCLIGraphTokenSource("")
 	}
 
 	return &Client{base: base, client: client, tokens: tokens}, nil
@@ -367,6 +386,118 @@ func (c *Client) EnsureAgentIdentity(ctx context.Context, blueprintID, displayNa
 	return id, true, nil
 }
 
+// BlueprintCreateCall returns the exact write CreateBlueprint issues for
+// displayName sponsored by sponsors — research write-surface step 1. Exposed so
+// provision prints the POST (method, endpoint, full body including the sponsor
+// @odata.bind list) before issuing it and renders the identical call under
+// --dry-run without a write. The create POSTs into the same applications
+// collection ListBlueprints reads. Sponsor ids reuse sponsorBindURL so the
+// blueprint and identity creates render one bind form against the Client's own
+// Graph base, and the printed and issued bodies agree.
+func (c *Client) BlueprintCreateCall(displayName string, sponsors []string) (WriteCall, error) {
+	binds := make([]string, len(sponsors))
+	for i, id := range sponsors {
+		binds[i] = c.sponsorBindURL(id)
+	}
+	body, err := json.Marshal(blueprintCreateBody{
+		DisplayName:       displayName,
+		SponsorsODataBind: binds,
+	})
+	if err != nil {
+		return WriteCall{}, fmt.Errorf("marshal blueprint create body: %w", err)
+	}
+	return WriteCall{Method: http.MethodPost, Endpoint: c.blueprintsURL(), Body: body}, nil
+}
+
+// CreateBlueprint registers the installation's agent-identity blueprint — the
+// application object every agent identity is later created under — sponsored by
+// the human object ids in sponsors, through write-surface step 1:
+//
+//	POST {graph}/applications/microsoft.graph.agentIdentityBlueprint
+//
+// The creator auto-becomes owner. Unlike the agent-identity create under an
+// owned blueprint (which needs no Agent ID role), this write needs the Agent ID
+// Developer or Administrator role, so a 403 surfaces as *PrivilegeError; any
+// other non-2xx as *APIError. It decodes and returns the created blueprint,
+// whose AppID the principal create (step 2) and config.yaml consume.
+func (c *Client) CreateBlueprint(ctx context.Context, displayName string, sponsors []string) (Blueprint, error) {
+	call, err := c.BlueprintCreateCall(displayName, sponsors)
+	if err != nil {
+		return Blueprint{}, fmt.Errorf("entra: create blueprint %q: %w", displayName, err)
+	}
+	var created blueprintEntry
+	if err := c.doWrite(ctx, call.Method, call.Endpoint, call.Body, &created); err != nil {
+		return Blueprint{}, fmt.Errorf("entra: create blueprint %q: %w", displayName, err)
+	}
+	return Blueprint(created), nil
+}
+
+// BlueprintPrincipalCreateCall returns the exact write CreateBlueprintPrincipal
+// issues for appID — research write-surface step 2 — so provision prints and
+// dry-runs it identically. The body names the blueprint by the appId step 1
+// returned; nothing else is required.
+func (c *Client) BlueprintPrincipalCreateCall(appID string) (WriteCall, error) {
+	body, err := json.Marshal(blueprintPrincipalCreateBody{AppID: appID})
+	if err != nil {
+		return WriteCall{}, fmt.Errorf("marshal blueprint principal create body: %w", err)
+	}
+	return WriteCall{Method: http.MethodPost, Endpoint: c.blueprintPrincipalCreateURL(), Body: body}, nil
+}
+
+// CreateBlueprintPrincipal creates the blueprint's service principal — the
+// principal that makes the blueprint usable to act under — for the blueprint
+// identified by appID (the appId CreateBlueprint returned), through write-surface
+// step 2:
+//
+//	POST {graph}/servicePrincipals/microsoft.graph.agentIdentityBlueprintPrincipal
+//
+// The creator auto-becomes owner. Like the blueprint create it needs the Agent
+// ID Developer or Administrator role, so a 403 surfaces as *PrivilegeError; any
+// other non-2xx as *APIError. It decodes nothing — no downstream step consumes
+// the principal id; config.yaml records the blueprint appId.
+func (c *Client) CreateBlueprintPrincipal(ctx context.Context, appID string) error {
+	call, err := c.BlueprintPrincipalCreateCall(appID)
+	if err != nil {
+		return fmt.Errorf("entra: create blueprint principal for appId %q: %w", appID, err)
+	}
+	if err := c.doWrite(ctx, call.Method, call.Endpoint, call.Body, nil); err != nil {
+		return fmt.Errorf("entra: create blueprint principal for appId %q: %w", appID, err)
+	}
+	return nil
+}
+
+// EnsureBlueprint is the idempotent ensure for the installation's single
+// blueprint (US-0014 AC-14.2): it lists the existing blueprints and, when one
+// already exists, returns it with created=false and issues no write — an
+// installation owns at most one blueprint (US-0014 out-of-scope: one blueprint
+// per tenant), so the first found is the installation blueprint. Otherwise it
+// creates the blueprint (step 1) then its blueprint principal (step 2),
+// sponsored by sponsors, and returns the created blueprint with created=true. A
+// 403 on either write is a *PrivilegeError naming the Agent ID role the create
+// needs, so the caller fails with guidance rather than a raw Graph 403.
+//
+// Re-entrancy caveat: if the blueprint create succeeds but the principal create
+// fails, a later run finds the blueprint and returns created=false without
+// retrying the principal (this story reads blueprints, not principals); the
+// operator completes the principal from the fail-with-guidance output.
+func (c *Client) EnsureBlueprint(ctx context.Context, displayName string, sponsors []string) (bp Blueprint, created bool, err error) {
+	existing, err := c.ListBlueprints(ctx)
+	if err != nil {
+		return Blueprint{}, false, err
+	}
+	if len(existing) > 0 {
+		return existing[0], false, nil
+	}
+	bp, err = c.CreateBlueprint(ctx, displayName, sponsors)
+	if err != nil {
+		return Blueprint{}, false, err
+	}
+	if err := c.CreateBlueprintPrincipal(ctx, bp.AppID); err != nil {
+		return Blueprint{}, false, err
+	}
+	return bp, true, nil
+}
+
 func (c *Client) blueprintsURL() string {
 	return c.base.JoinPath("applications", "microsoft.graph.agentIdentityBlueprint").String()
 }
@@ -390,6 +521,13 @@ func (c *Client) agentUsersURL() string {
 // collection the create POST registers a new identity into.
 func (c *Client) agentIdentityCreateURL() string {
 	return c.base.JoinPath("servicePrincipals", "microsoft.graph.agentIdentity").String()
+}
+
+// blueprintPrincipalCreateURL is the write endpoint for the blueprint's service
+// principal (research step 2) — a servicePrincipals collection distinct from the
+// agentIdentity one, with no OData query.
+func (c *Client) blueprintPrincipalCreateURL() string {
+	return c.base.JoinPath("servicePrincipals", "microsoft.graph.agentIdentityBlueprintPrincipal").String()
 }
 
 // sponsorBindURL renders one sponsor object id as the Graph @odata.bind
@@ -517,6 +655,24 @@ type agentIdentityCreateBody struct {
 	DisplayName              string   `json:"displayName"`
 	AgentIdentityBlueprintID string   `json:"agentIdentityBlueprintId"`
 	SponsorsODataBind        []string `json:"sponsors@odata.bind"`
+}
+
+// blueprintCreateBody is the v1.0 create payload for write-surface step 1
+// (agentidentityblueprint-post): a blueprint carries its displayName and the
+// same Graph @odata.bind list of human sponsors the agent-identity create takes
+// — the Mandate invariant (an agent principal is sponsored by a named human)
+// holds at the blueprint level too, and the creator auto-becomes owner.
+type blueprintCreateBody struct {
+	DisplayName       string   `json:"displayName"`
+	SponsorsODataBind []string `json:"sponsors@odata.bind"`
+}
+
+// blueprintPrincipalCreateBody is the v1.0 create payload for write-surface
+// step 2 (agentidentityblueprintprincipal-post): it names the blueprint by the
+// appId step 1 returned. A blueprint without its principal is registered but
+// cannot be acted under, so ensure creates both.
+type blueprintPrincipalCreateBody struct {
+	AppID string `json:"appId"`
 }
 
 // agentUsersResponse is the agent-user-list envelope.

@@ -593,18 +593,18 @@ func newInteractiveScript(lines []string) *bufio.Reader {
 // failingTokenSource simulates az missing or the operator not being logged
 // in, so every test exercising the manual-entry interview flow does so
 // deterministically, with no real az invocation and no dependence on the
-// test host's environment (US-0013 AC-13.1). The tenant argument (US-0015) is
+// test host's environment (US-0013 AC-13.1). The account-id argument (US-0015) is
 // ignored: a failing source never reaches the mint.
 func failingTokenSource(context.Context, string) (string, error) {
 	return "", errors.New("az: command not found")
 }
 
 // discoveryTenantPrefill is the fresh-install prefill the interview tests that
-// exercise discovery pass: a resolved tenant so the tenant-pinned discovery
-// token is minted (US-0015), with the role identities left empty so those
-// fields still prompt from the script exactly as before.
+// exercise discovery pass: a resolved tenant (so discovery is attempted) and the
+// az account that pins its token (US-0015), with the role identities left empty
+// so those fields still prompt from the script exactly as before.
 func discoveryTenantPrefill() discoveredPrefill {
-	return discoveredPrefill{tenant: "11111111-1111-1111-1111-111111111111"}
+	return discoveredPrefill{tenant: "11111111-1111-1111-1111-111111111111", accountID: "account-11111111"}
 }
 
 // unreachableDiscoverer fails a test if the interview ever calls discover
@@ -944,7 +944,7 @@ func discovererFor(t *testing.T, srv *httptest.Server) discoverer {
 }
 
 // fakeADOTokenSource always returns token with no az invocation. It ignores the
-// tenant argument (US-0015): tests that assert the tenant pin use a capturing
+// account-id argument (US-0015): tests that assert the mint pin use a capturing
 // source instead.
 func fakeADOTokenSource(token string) tokenSource {
 	return func(context.Context, string) (string, error) {
@@ -1705,21 +1705,21 @@ func TestEnvInput_BadNumericSkipped(t *testing.T) {
 	}
 }
 
-// swapDeriveTenant installs fn as init's tenant-derivation seam for the test's
+// swapListTenants installs fn as init's tenant-enumeration seam for the test's
 // duration, restoring the production one on cleanup. A test that swaps it runs
-// non-parallel: deriveTenant is package state and -race rejects a concurrent
+// non-parallel: listTenants is package state and -race rejects a concurrent
 // write.
-func swapDeriveTenant(t *testing.T, fn func(context.Context) (string, error)) {
+func swapListTenants(t *testing.T, fn func(context.Context) ([]tenantOption, error)) {
 	t.Helper()
-	saved := deriveTenant
-	deriveTenant = fn
-	t.Cleanup(func() { deriveTenant = saved })
+	saved := listTenants
+	listTenants = fn
+	t.Cleanup(func() { listTenants = saved })
 }
 
 // swapDiscoverEntra installs fn as init's Entra-registry seam for the test's
 // duration, restoring the production one on cleanup. Non-parallel for the same
-// reason as swapDeriveTenant.
-func swapDiscoverEntra(t *testing.T, fn func(context.Context) (entra.Registry, error)) {
+// reason as swapListTenants.
+func swapDiscoverEntra(t *testing.T, fn func(context.Context, string) (entra.Registry, error)) {
 	t.Helper()
 	saved := discoverEntra
 	discoverEntra = fn
@@ -1742,14 +1742,15 @@ func writeFakeAz(t *testing.T) (argsFile string) {
 	return argsFile
 }
 
-// TestAzCLITokenSource_PinsTenantFlag is US-0015 AC-15.4's contract test: with a
-// fake az on PATH, the production token source's argument list carries --tenant
-// <configured value>. Dropping --tenant from azCLITokenSource reproduces a
-// failing test, not a silent pass. Not parallel: mutates PATH.
-func TestAzCLITokenSource_PinsTenantFlag(t *testing.T) {
+// TestAzCLITokenSource_PinsSubscriptionFlag is US-0015 AC-15.4's contract test:
+// with a fake az on PATH, the production token source's argument list carries
+// --subscription <az account id> — the pin that works without a re-login, unlike
+// --tenant. Dropping --subscription from azCLITokenSource reproduces a failing
+// test, not a silent pass. Not parallel: mutates PATH.
+func TestAzCLITokenSource_PinsSubscriptionFlag(t *testing.T) {
 	argsFile := writeFakeAz(t)
 
-	token, err := azCLITokenSource(context.Background(), "my-tenant-id")
+	token, err := azCLITokenSource(context.Background(), "my-account-id")
 	if err != nil {
 		t.Fatalf("azCLITokenSource() error = %v, want nil", err)
 	}
@@ -1760,19 +1761,22 @@ func TestAzCLITokenSource_PinsTenantFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read captured args: %v", err)
 	}
-	if !strings.Contains(string(args), "--tenant my-tenant-id") {
-		t.Errorf("az args = %q, want them to carry --tenant my-tenant-id (US-0015 AC-15.4)", string(args))
+	if !strings.Contains(string(args), "--subscription my-account-id") {
+		t.Errorf("az args = %q, want them to carry --subscription my-account-id (US-0015 AC-15.4)", string(args))
+	}
+	if strings.Contains(string(args), "--tenant") {
+		t.Errorf("az args = %q, want no --tenant (it forces a re-login; --subscription pins instead)", string(args))
 	}
 	if !strings.Contains(string(args), "--resource "+adoResourceID) {
 		t.Errorf("az args = %q, want the pinned ADO --resource still present", string(args))
 	}
 }
 
-// TestAzCLITokenSource_EmptyTenant_OmitsFlag proves the guard: with no tenant,
-// azCLITokenSource omits --tenant rather than passing --tenant "" (the interview
-// never calls it without a tenant — it skips discovery instead, AC-15.5). Not
-// parallel: mutates PATH.
-func TestAzCLITokenSource_EmptyTenant_OmitsFlag(t *testing.T) {
+// TestAzCLITokenSource_EmptyAccount_OmitsFlag proves the guard: with no account,
+// azCLITokenSource omits --subscription rather than passing --subscription "" (the
+// interview skips discovery when no tenant resolves, AC-15.5, and an --entra-tenant
+// override probes the active account). Not parallel: mutates PATH.
+func TestAzCLITokenSource_EmptyAccount_OmitsFlag(t *testing.T) {
 	argsFile := writeFakeAz(t)
 
 	if _, err := azCLITokenSource(context.Background(), ""); err != nil {
@@ -1782,8 +1786,8 @@ func TestAzCLITokenSource_EmptyTenant_OmitsFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read captured args: %v", err)
 	}
-	if strings.Contains(string(args), "--tenant") {
-		t.Errorf("az args = %q, want no --tenant flag for an empty tenant", string(args))
+	if strings.Contains(string(args), "--subscription") {
+		t.Errorf("az args = %q, want no --subscription flag for an empty account", string(args))
 	}
 }
 
@@ -1854,64 +1858,185 @@ func TestRoleIdentitiesFromRegistry_MatchWithoutPairedUser(t *testing.T) {
 	}
 }
 
-// TestResolvePrefill_FreshInstall_DerivesTenantAndReadsRegistry proves the
-// resolve step init runs before the interview: on a fresh install it derives the
-// tenant and reads the registry through the injectable seams. Not parallel: it
-// swaps package-var seams.
-func TestResolvePrefill_FreshInstall_DerivesTenantAndReadsRegistry(t *testing.T) {
-	swapDeriveTenant(t, func(context.Context) (string, error) { return "derived-tenant", nil })
-	swapDiscoverEntra(t, func(context.Context) (entra.Registry, error) {
+// TestResolvePrefill_FreshInstall_SingleTenantAutoPicksAndReadsRegistry proves
+// the resolve step init runs before the interview: a lone enumerated tenant
+// auto-picks (no prompt, like a single discovered org), config gets its TenantID,
+// and the registry read is pinned to its AccountID. Not parallel: it swaps
+// package-var seams.
+func TestResolvePrefill_FreshInstall_SingleTenantAutoPicksAndReadsRegistry(t *testing.T) {
+	swapListTenants(t, func(context.Context) ([]tenantOption, error) {
+		return []tenantOption{{TenantID: "solo-tenant", AccountID: "solo-account", Name: "Contoso"}}, nil
+	})
+	var gotAccount string
+	swapDiscoverEntra(t, func(_ context.Context, accountID string) (entra.Registry, error) {
+		gotAccount = accountID
 		return entra.Registry{
 			Identities: []entra.AgentIdentity{{ID: "id-dev", DisplayName: "dev-agent"}},
 			Users:      []entra.AgentUser{{ID: "u-dev", UserPrincipalName: "dev@contoso", IdentityParentID: "id-dev"}},
 		}, nil
 	})
 
-	pf := resolvePrefill(context.Background(), nil)
-	if pf.tenant != "derived-tenant" {
-		t.Errorf("prefill.tenant = %q, want the derived tenant", pf.tenant)
+	var out strings.Builder
+	pf := resolvePrefill(context.Background(), bufio.NewReader(strings.NewReader("")), &out, nil, "")
+	if pf.tenant != "solo-tenant" {
+		t.Errorf("prefill.tenant = %q, want the sole tenant's id (goes to config.entra.tenant)", pf.tenant)
+	}
+	if pf.accountID != "solo-account" {
+		t.Errorf("prefill.accountID = %q, want the sole tenant's az account id (the mint pin)", pf.accountID)
+	}
+	if gotAccount != "solo-account" {
+		t.Errorf("registry read pinned to account %q, want the chosen %q", gotAccount, "solo-account")
 	}
 	if pf.roleIdentities["dev"].identityID != "id-dev" {
 		t.Errorf("prefill dev identity = %+v, want id-dev from the registry", pf.roleIdentities["dev"])
 	}
+	// A single tenant auto-picks like a single discovered org: no picker prompt.
+	if strings.Contains(out.String(), "Multiple Entra tenants") {
+		t.Errorf("out = %q, want no picker prompt for a single tenant", out.String())
+	}
 }
 
-// TestResolvePrefill_SeamsFail_LeaveEmpty proves the never-fatal contract: a
-// failed tenant derivation or an unreachable registry leaves the prefill empty
-// (US-0015 AC-15.5; auto-derive fallback), so the interview prompts every field.
-// Not parallel: swaps package-var seams.
-func TestResolvePrefill_SeamsFail_LeaveEmpty(t *testing.T) {
-	swapDeriveTenant(t, func(context.Context) (string, error) { return "", errors.New("az missing") })
-	swapDiscoverEntra(t, func(context.Context) (entra.Registry, error) {
-		return entra.Registry{}, errors.New("graph unreachable")
+// TestResolvePrefill_MultipleTenants_ChosenValuePinsDiscovery proves the picker:
+// with several tenants the operator's selection yields the TenantID for config and
+// the AccountID that pins the registry read (and, downstream, the
+// discovery/validation tokens). Not parallel: swaps package-var seams.
+func TestResolvePrefill_MultipleTenants_ChosenValuePinsDiscovery(t *testing.T) {
+	swapListTenants(t, func(context.Context) ([]tenantOption, error) {
+		return []tenantOption{
+			{TenantID: "tenant-a", AccountID: "account-a", Name: "Contoso"},
+			{TenantID: "tenant-b", AccountID: "account-b", Name: "Fabrikam"},
+		}, nil
+	})
+	var gotAccount string
+	swapDiscoverEntra(t, func(_ context.Context, accountID string) (entra.Registry, error) {
+		gotAccount = accountID
+		return entra.Registry{}, nil
 	})
 
-	pf := resolvePrefill(context.Background(), nil)
+	// The operator selects row 2 (tenant-b / account-b).
+	var out strings.Builder
+	pf := resolvePrefill(context.Background(), bufio.NewReader(strings.NewReader("2\n")), &out, nil, "")
+	if pf.tenant != "tenant-b" {
+		t.Errorf("prefill.tenant = %q, want the chosen row-2 tenant-b", pf.tenant)
+	}
+	if pf.accountID != "account-b" {
+		t.Errorf("prefill.accountID = %q, want the chosen row-2 account-b", pf.accountID)
+	}
+	if gotAccount != "account-b" {
+		t.Errorf("registry read pinned to %q, want the chosen account %q", gotAccount, "account-b")
+	}
+	if !strings.Contains(out.String(), "Fabrikam") {
+		t.Errorf("out = %q, want the picker to list the tenant names", out.String())
+	}
+}
+
+// TestResolvePrefill_TenantOverride_SkipsPicker proves US-0015 AC-15.3: an
+// explicit --entra-tenant/MANDAT_ENTRA_TENANT value becomes prefill.tenant and
+// skips the picker entirely (listTenants is never called); it carries no az
+// account, so prefill.accountID is empty and the mint falls back to the active
+// account. Not parallel: swaps package-var seams.
+func TestResolvePrefill_TenantOverride_SkipsPicker(t *testing.T) {
+	swapListTenants(t, func(context.Context) ([]tenantOption, error) {
+		t.Fatal("listTenants called with an explicit tenant override, want the picker skipped")
+		return nil, nil
+	})
+	var gotAccount string
+	swapDiscoverEntra(t, func(_ context.Context, accountID string) (entra.Registry, error) {
+		gotAccount = accountID
+		return entra.Registry{}, nil
+	})
+
+	pf := resolvePrefill(context.Background(), bufio.NewReader(strings.NewReader("")), new(strings.Builder), nil, "override-tenant")
+	if pf.tenant != "override-tenant" {
+		t.Errorf("prefill.tenant = %q, want the override", pf.tenant)
+	}
+	if pf.accountID != "" {
+		t.Errorf("prefill.accountID = %q, want empty (an override carries no az account) (AC-15.3)", pf.accountID)
+	}
+	if gotAccount != "" {
+		t.Errorf("registry read pinned to account %q, want empty (fall back to the active account)", gotAccount)
+	}
+}
+
+// TestResolvePrefill_EnumerationFails_LeavesEmptyAndSkipsRegistry proves the
+// never-fatal fallback: an enumeration failure leaves prefill.tenant empty
+// (US-0015 AC-15.5), and with no tenant the registry read is skipped rather than
+// minting an unpinned token, so the interview prompts every field. Not parallel:
+// swaps package-var seams.
+func TestResolvePrefill_EnumerationFails_LeavesEmptyAndSkipsRegistry(t *testing.T) {
+	swapListTenants(t, func(context.Context) ([]tenantOption, error) {
+		return nil, errors.New("az missing")
+	})
+	swapDiscoverEntra(t, func(context.Context, string) (entra.Registry, error) {
+		t.Fatal("discoverEntra called with no resolved tenant, want the registry read skipped")
+		return entra.Registry{}, nil
+	})
+
+	var out strings.Builder
+	pf := resolvePrefill(context.Background(), bufio.NewReader(strings.NewReader("")), &out, nil, "")
 	if pf.tenant != "" {
-		t.Errorf("prefill.tenant = %q, want empty when derivation fails", pf.tenant)
+		t.Errorf("prefill.tenant = %q, want empty when enumeration fails", pf.tenant)
 	}
 	if len(pf.roleIdentities) != 0 {
-		t.Errorf("prefill.roleIdentities = %+v, want empty when the registry is unreachable", pf.roleIdentities)
+		t.Errorf("prefill.roleIdentities = %+v, want empty (registry read skipped with no tenant)", pf.roleIdentities)
+	}
+	if !strings.Contains(out.String(), "note:") {
+		t.Errorf("out = %q, want a one-line note about the enumeration failure", out.String())
 	}
 }
 
-// TestResolvePrefill_Rerun_SkipsDerivation proves a re-run (any non-nil prior)
+// TestResolvePrefill_Rerun_SkipsEnumeration proves a re-run (any non-nil prior)
 // consults neither seam: the stored config, not a fresh probe, is the source of
 // truth. Not parallel: swaps package-var seams.
-func TestResolvePrefill_Rerun_SkipsDerivation(t *testing.T) {
-	swapDeriveTenant(t, func(context.Context) (string, error) {
-		t.Fatal("deriveTenant called on a re-run, want the stored config used")
-		return "", nil
+func TestResolvePrefill_Rerun_SkipsEnumeration(t *testing.T) {
+	swapListTenants(t, func(context.Context) ([]tenantOption, error) {
+		t.Fatal("listTenants called on a re-run, want the stored config used")
+		return nil, nil
 	})
-	swapDiscoverEntra(t, func(context.Context) (entra.Registry, error) {
+	swapDiscoverEntra(t, func(context.Context, string) (entra.Registry, error) {
 		t.Fatal("discoverEntra called on a re-run, want the stored config used")
 		return entra.Registry{}, nil
 	})
 
 	prior := validNonInteractiveInput()
-	pf := resolvePrefill(context.Background(), &prior)
+	pf := resolvePrefill(context.Background(), bufio.NewReader(strings.NewReader("")), new(strings.Builder), &prior, "")
 	if pf.tenant != "" || len(pf.roleIdentities) != 0 {
 		t.Errorf("re-run prefill = %+v, want empty (interview reads the stored config)", pf)
+	}
+}
+
+// TestPickTenant_SelectsByNumberIdOrReprompts proves the picker's confirm-or-
+// override shape: Enter takes the first tenant, a row number selects that tenant
+// (both carrying its az account id), a typed id that names a LISTED tenant selects
+// that tenant WITH its account id (an operator naturally types the id shown in the
+// row — it must not be mistaken for an accountless override), a typed id on NO
+// listed tenant is an accountless override (empty account id → active account),
+// and an out-of-range number re-prompts rather than pinning a wrong tenant.
+func TestPickTenant_SelectsByNumberIdOrReprompts(t *testing.T) {
+	t.Parallel()
+
+	tenants := []tenantOption{
+		{TenantID: "tenant-a", AccountID: "account-a", Name: "A"},
+		{TenantID: "tenant-b", AccountID: "account-b", Name: "B"},
+	}
+	for _, tc := range []struct{ name, script, wantTenant, wantAccountID string }{
+		{"enter takes first", "\n", "tenant-a", "account-a"},
+		{"row number selects", "2\n", "tenant-b", "account-b"},
+		// The load-bearing case: typing a listed tenant's id keeps its account id
+		// (the mint pin), not "" — reverting the match reproduces the live 401.
+		{"typed listed tenant id keeps its account", "tenant-b\n", "tenant-b", "account-b"},
+		{"typed listed account id keeps its account", "account-b\n", "tenant-b", "account-b"},
+		{"typed unlisted id is an accountless override", "tenant-z\n", "tenant-z", ""},
+		{"out-of-range reprompts", "9\n1\n", "tenant-a", "account-a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			iv := &interviewer{r: bufio.NewReader(strings.NewReader(tc.script)), w: new(strings.Builder)}
+			got := iv.pickTenant(tenants)
+			if got.TenantID != tc.wantTenant || got.AccountID != tc.wantAccountID {
+				t.Errorf("pickTenant(%q) = %+v, want TenantID %q / AccountID %q", tc.script, got, tc.wantTenant, tc.wantAccountID)
+			}
+		})
 	}
 }
 
@@ -1990,25 +2115,26 @@ func TestRunInteractiveInterview_MissingRoleInRegistry_PromptsForIt(t *testing.T
 	}
 }
 
-// TestRunInteractiveInterview_DiscoveryPinsTenantToTokenSource proves US-0015
-// AC-15.1 at the discovery call site: the token minted for discovery is scoped
-// to the resolved tenant. A capturing token source records the tenant it was
-// asked to mint for; it then errors so the interview falls back to the script.
-func TestRunInteractiveInterview_DiscoveryPinsTenantToTokenSource(t *testing.T) {
+// TestRunInteractiveInterview_DiscoveryPinsAccountToTokenSource proves US-0015
+// AC-15.1 at the discovery call site: the token minted for discovery is pinned to
+// the chosen az account (--subscription), not the tenant. A capturing token
+// source records the account id it was asked to mint for; it then errors so the
+// interview falls back to the script.
+func TestRunInteractiveInterview_DiscoveryPinsAccountToTokenSource(t *testing.T) {
 	t.Parallel()
 
-	var gotTenant string
-	capturing := func(_ context.Context, tenant string) (string, error) {
-		gotTenant = tenant
-		return "", errors.New("stop after capturing the tenant")
+	var gotAccount string
+	capturing := func(_ context.Context, accountID string) (string, error) {
+		gotAccount = accountID
+		return "", errors.New("stop after capturing the account id")
 	}
 
-	_, err := runInteractiveInterview(context.Background(), newInteractiveScript(validInteractiveScriptLines()), new(strings.Builder), capturing, unreachableDiscoverer(t), nil, discoveredPrefill{tenant: "pinned-tenant"})
+	_, err := runInteractiveInterview(context.Background(), newInteractiveScript(validInteractiveScriptLines()), new(strings.Builder), capturing, unreachableDiscoverer(t), nil, discoveredPrefill{tenant: "pinned-tenant", accountID: "pinned-account"})
 	if err != nil {
 		t.Fatalf("runInteractiveInterview() error = %v", err)
 	}
-	if gotTenant != "pinned-tenant" {
-		t.Errorf("discovery token minted for tenant %q, want the resolved %q (US-0015 AC-15.1)", gotTenant, "pinned-tenant")
+	if gotAccount != "pinned-account" {
+		t.Errorf("discovery token minted for account %q, want the chosen %q (US-0015 AC-15.1)", gotAccount, "pinned-account")
 	}
 }
 
@@ -2041,25 +2167,25 @@ func TestRunInteractiveInterview_NoTenant_SkipsDiscovery(t *testing.T) {
 	}
 }
 
-// TestValidateADOBeforeWrite_PinsTenantToTokenSource proves US-0015 AC-15.1 at
-// the pre-write validation call site: the probe token is minted scoped to the
-// interviewed tenant.
-func TestValidateADOBeforeWrite_PinsTenantToTokenSource(t *testing.T) {
+// TestValidateADOBeforeWrite_PinsAccountToTokenSource proves US-0015 AC-15.1 at
+// the pre-write validation call site: the probe token is minted pinned to the
+// chosen az account (--subscription), not the tenant.
+func TestValidateADOBeforeWrite_PinsAccountToTokenSource(t *testing.T) {
 	t.Parallel()
 
-	var gotTenant string
-	capturing := func(_ context.Context, tenant string) (string, error) {
-		gotTenant = tenant
+	var gotAccount string
+	capturing := func(_ context.Context, accountID string) (string, error) {
+		gotAccount = accountID
 		return "tok", nil
 	}
 	okValidate := func(context.Context, string, string) error { return nil }
 
 	var out strings.Builder
-	if !validateADOBeforeWrite(context.Background(), capturing, okValidate, "my-tenant", "contoso", &out) {
+	if !validateADOBeforeWrite(context.Background(), capturing, okValidate, "my-account", "contoso", &out) {
 		t.Fatalf("validateADOBeforeWrite() = false, want true (out: %s)", out.String())
 	}
-	if gotTenant != "my-tenant" {
-		t.Errorf("validation token minted for tenant %q, want the pinned %q (US-0015 AC-15.1)", gotTenant, "my-tenant")
+	if gotAccount != "my-account" {
+		t.Errorf("validation token minted for account %q, want the pinned %q (US-0015 AC-15.1)", gotAccount, "my-account")
 	}
 }
 

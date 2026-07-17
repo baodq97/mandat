@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -113,7 +114,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	trackerOrg := fs.String("tracker-org", "", "Azure DevOps organization name")
 	trackerProject := fs.String("tracker-project", "", "Azure DevOps project name")
 	authMode := fs.String("auth-mode", "", "credential path: arc-managed-identity or client-certificate")
-	entraTenant := fs.String("entra-tenant", "", "Entra tenant id")
+	entraTenant := fs.String("entra-tenant", "", "Entra tenant id (interactive: skips the tenant picker; az mints then target your active account, so activate this tenant first)")
 	entraBlueprint := fs.String("entra-blueprint", "", "Entra agent-identity blueprint name")
 	repo := fs.String("repo", "", "repo registry entry as key=url")
 	baseBranch := fs.String("base-branch", "", "base branch for the repo")
@@ -158,11 +159,13 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		// disk an env-derived prior still seeds the interview, otherwise prior
 		// stays nil and the fresh-install discovery path runs.
 		prior = mergeEnvOverPrior(prior, envInput())
-		// Derive the machine-known defaults BEFORE the interview mints any
-		// discovery token (US-0015 AC-15.2): the az-session tenant that pins that
-		// token and the per-role Entra identities the interview offers as
-		// confirmed bracketed defaults.
-		prefill := resolvePrefill(context.Background(), prior)
+		// Choose the tenant that pins every mint and read the per-role Entra
+		// identities BEFORE the interview mints any discovery token (US-0015
+		// AC-15.2): the operator picks the tenant (or a single one auto-picks, or
+		// --entra-tenant overrides) so discovery is pinned to the CHOSEN tenant,
+		// never az's ambient default, and the identities become confirmed
+		// bracketed defaults.
+		prefill := resolvePrefill(context.Background(), reader, stdout, prior, *entraTenant)
 		interviewed, err := runInteractiveInterview(context.Background(), reader, stdout, azCLITokenSource, productionDiscoverer, prior, prefill)
 		if err != nil {
 			fmt.Fprintf(stderr, "mandat init: %v\n", err)
@@ -175,10 +178,11 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		// AC-13.1's refuse gate: an az-derived token that cannot reach the chosen
 		// org fails here, before any byte lands on disk (the non-interactive path
 		// takes no az token, so it is deliberately not gated). The token is pinned
-		// to the interviewed entra.tenant, never az's ambient default (US-0015
-		// AC-15.1); entra.tenant is a required field, so it is always resolved by
-		// the time this runs (AC-15.5).
-		if !validateADOBeforeWrite(context.Background(), azCLITokenSource, productionOrgValidator, interviewed.entraTenant, interviewed.trackerOrg, stderr) {
+		// to the chosen az account (--subscription), the same account discovery
+		// used, so the probe targets the account the operator picked without
+		// switching az's active login (US-0015 AC-15.1). An --entra-tenant override
+		// carries no az account, so the probe runs against the active account.
+		if !validateADOBeforeWrite(context.Background(), azCLITokenSource, productionOrgValidator, prefill.accountID, interviewed.trackerOrg, stderr) {
 			return 1
 		}
 		// A TTY operator still confirms the diff unless they passed --yes.
@@ -845,6 +849,43 @@ func (iv *interviewer) confirmOrPrompt(label string, options []string) (string, 
 	return options[0], nil
 }
 
+// pickTenant presents the enumerated tenants as a numbered list and returns the
+// chosen one — the caller writes its TenantID to config and pins the mints to its
+// AccountID. It mirrors confirmOrPrompt's confirm-or-override shape: Enter takes
+// the first, and a row number selects that tenant. A typed id (the natural
+// response, since each row shows its tenant id) that matches a listed tenant
+// selects that tenant WITH its az account id; only an id matching NO listed
+// tenant is an accountless override, whose AccountID is "" so the mints fall back
+// to the active account (every value stays overridable). An out-of-range number
+// re-prompts rather than pinning the wrong tenant.
+func (iv *interviewer) pickTenant(tenants []tenantOption) tenantOption {
+	fmt.Fprintln(iv.w, "Multiple Entra tenants are visible to your az session; choose the one to pin every token to:")
+	for i, t := range tenants {
+		fmt.Fprintf(iv.w, "  %d) %s (%s)\n", i+1, t.Name, t.TenantID)
+	}
+	for {
+		value := iv.withDefault("entra.tenant (row number or id)", tenants[0].TenantID)
+		if value == "" {
+			return tenants[0]
+		}
+		if n, err := strconv.Atoi(value); err == nil {
+			if n >= 1 && n <= len(tenants) {
+				return tenants[n-1]
+			}
+			fmt.Fprintf(iv.w, "  choose 1-%d, or type a tenant id\n", len(tenants))
+			continue
+		}
+		// A typed id that names a listed tenant keeps that tenant's az account id
+		// (the mint pin); only an id not on the list is an accountless override.
+		for _, t := range tenants {
+			if value == t.TenantID || value == t.AccountID {
+				return t
+			}
+		}
+		return tenantOption{TenantID: value}
+	}
+}
+
 // repeated collects a repeatable field (remit paths, gate commands): one
 // entry per line, a blank line ends the list. At least one entry is
 // required; a blank first line re-prompts instead of accepting an empty
@@ -917,24 +958,28 @@ func validateNonNegativeInt(v string) error {
 // discovery.Client makes (see internal/discovery).
 const adoResourceID = "499b84ac-1321-427f-aa17-267ca6975798"
 
-// tokenSource obtains a bearer token for the ADO resource, scoped to tenant so
-// the mint is pinned to the operator's configured Entra tenant rather than az's
-// ambient default (US-0015 AC-15.1). It is a func field, not a hardcoded az
-// invocation, so a test supplies a fake token with no az call (US-0013 AC-13.1).
-type tokenSource func(ctx context.Context, tenant string) (string, error)
+// tokenSource obtains a bearer token for the ADO resource, scoped to the chosen
+// az account (--subscription accountID) so the mint targets that account without
+// switching az's active login (US-0015 AC-15.1; live probe 2026-07-17: --tenant
+// against a non-active tenant forces a fresh interactive login, --subscription
+// does not). It is a func field, not a hardcoded az invocation, so a test
+// supplies a fake token with no az call (US-0013 AC-13.1).
+type tokenSource func(ctx context.Context, accountID string) (string, error)
 
 // azCLITokenSource is the production tokenSource: it shells out to the az
 // CLI. When az is missing or the operator isn't logged in, the command fails
 // fast (it never prompts or blocks waiting for an interactive login), so the
 // caller's fallback to manual entry runs immediately, not after a hang.
-func azCLITokenSource(ctx context.Context, tenant string) (string, error) {
+func azCLITokenSource(ctx context.Context, accountID string) (string, error) {
 	args := []string{"account", "get-access-token", "--resource", adoResourceID}
-	// --tenant pins the mint to the operator's configured tenant, never az's
-	// ambient default (US-0015 AC-15.1). An empty tenant omits the flag rather
-	// than passing --tenant ""; the caller never mints an unpinned discovery
-	// token — it skips discovery when no tenant resolves (AC-15.5).
-	if tenant != "" {
-		args = append(args, "--tenant", tenant)
+	// --subscription pins the mint to the chosen az account, minting against it
+	// without changing az's active default; --tenant would instead demand a fresh
+	// interactive login when that tenant is not already active (live probe). An
+	// empty accountID omits the flag: the caller then skips discovery when no
+	// account resolves (AC-15.5), or falls back to the active account for an
+	// --entra-tenant override, which carries no az account id.
+	if accountID != "" {
+		args = append(args, "--subscription", accountID)
 	}
 	args = append(args, "--query", "accessToken", "-o", "tsv")
 	out, err := exec.CommandContext(ctx, "az", args...).Output()
@@ -948,25 +993,97 @@ func azCLITokenSource(ctx context.Context, tenant string) (string, error) {
 	return token, nil
 }
 
-// deriveTenant reads the Entra tenant id of the operator's active az session, so
-// init pins the discovery token to it (US-0015) and offers it as the
-// entra.tenant prompt default without the operator retyping a GUID. A var seam,
-// not a hardcoded az call, so a test supplies a tenant with no az invocation
-// (mirrors the tokenSource seam). It mirrors azCLITokenSource's fail-fast exec:
-// a missing or logged-out az returns an error the caller treats as "nothing to
-// prefill", never a hang.
-var deriveTenant = productionDeriveTenant
+// tenantOption is one Entra tenant the operator's az session can reach. TenantID
+// is the tenant GUID (written to config.entra.tenant and offered as the
+// entra.tenant prompt default); AccountID is an az account/subscription id under
+// that tenant, used ONLY to pin the az mints via --subscription — the pin that
+// works without a re-login where --tenant does not (live probe 2026-07-17). Name
+// is the az account name az account list reports (az exposes no first-class
+// tenant name here without a further Graph call, so the picker labels a tenant by
+// an account under it; a tenant-level account, which has none, shows a
+// "(tenant-level)" placeholder). For a tenant-level account TenantID == AccountID,
+// but a tenant that owns real subscriptions has TenantID != AccountID — so the
+// two are captured separately and the mint pin uses AccountID, never TenantID.
+type tenantOption struct {
+	TenantID  string
+	AccountID string
+	Name      string
+}
 
-func productionDeriveTenant(ctx context.Context) (string, error) {
-	out, err := exec.CommandContext(ctx, "az", "account", "show", "--query", "tenantId", "-o", "tsv").Output()
+// listTenants enumerates the Entra tenants the operator's az session can reach,
+// so a fresh-install interview lets the operator CHOOSE the tenant to pin every
+// mint to instead of inheriting az's ambient default — which, for discovery, is
+// no pin at all (US-0015 F1; init/provision pilot F4: the az default is not
+// sticky). A var seam, not a hardcoded az call, so a test supplies a fake list
+// with no az invocation (mirrors the tokenSource seam). A missing or logged-out
+// az returns an error the caller treats as "cannot enumerate", never a hang.
+var listTenants = productionListTenants
+
+func productionListTenants(ctx context.Context) ([]tenantOption, error) {
+	// id:id is the az account/subscription id the mint pins via --subscription;
+	// tenant:tenantId is the tenant written to config; name:name labels the row.
+	// A tenant surfaces once per account under it, so the caller dedupes by
+	// tenantId (one account id kept per distinct tenant).
+	out, err := exec.CommandContext(ctx, "az", "account", "list", "--all",
+		"--query", "[].{id:id, tenant:tenantId, name:name}", "-o", "json").Output()
 	if err != nil {
-		return "", fmt.Errorf("az account show: %w", err)
+		return nil, fmt.Errorf("az account list: %w", err)
 	}
-	tenant := strings.TrimSpace(string(out))
-	if tenant == "" {
-		return "", errors.New("az account show returned no tenantId")
+	var raw []struct {
+		ID     string `json:"id"`
+		Tenant string `json:"tenant"`
+		Name   string `json:"name"`
 	}
-	return tenant, nil
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("decode az account list: %w", err)
+	}
+	var tenants []tenantOption
+	seen := make(map[string]bool)
+	for _, r := range raw {
+		if r.Tenant == "" || seen[r.Tenant] {
+			continue
+		}
+		seen[r.Tenant] = true
+		name := r.Name
+		// A tenant-level account carries az's literal "N/A(tenant level account)"
+		// marker (and a bare entry may report none); show a stable placeholder
+		// rather than the marker.
+		if name == "" || name == "N/A(tenant level account)" {
+			name = "(tenant-level)"
+		}
+		tenants = append(tenants, tenantOption{TenantID: r.Tenant, AccountID: r.ID, Name: name})
+	}
+	return tenants, nil
+}
+
+// chooseTenant resolves, BEFORE discovery runs (US-0015 AC-15.2), the tenant a
+// fresh-install interview writes to config.entra.tenant (tenantID) and the az
+// account the mints pin to via --subscription (accountID). An explicit
+// --entra-tenant/MANDAT_ENTRA_TENANT override wins and skips the picker
+// (AC-15.3); it carries no az account, so accountID is "" and the mints fall back
+// to az's active account (the operator is expected to have that tenant active).
+// Otherwise it enumerates the operator's tenants and, with exactly one, auto-picks
+// it (like a single discovered org); with several, it lets the operator choose the
+// intended one. An enumeration that fails or is empty returns "","" so the
+// interview prompts entra.tenant and skips discovery (AC-15.5), never a hard fail.
+func chooseTenant(ctx context.Context, iv *interviewer, override string) (tenantID, accountID string) {
+	if override != "" {
+		return override, ""
+	}
+	tenants, err := listTenants(ctx)
+	if err != nil {
+		fmt.Fprintf(iv.w, "note: could not enumerate Entra tenants (%v); falling back to the entra.tenant prompt\n", err)
+		return "", ""
+	}
+	if len(tenants) == 0 {
+		fmt.Fprintln(iv.w, "note: az reported no Entra tenants; falling back to the entra.tenant prompt")
+		return "", ""
+	}
+	if len(tenants) == 1 {
+		return tenants[0].TenantID, tenants[0].AccountID
+	}
+	opt := iv.pickTenant(tenants)
+	return opt.TenantID, opt.AccountID
 }
 
 // discoverer runs the discovery chain for token. It is a func field so a
@@ -986,15 +1103,16 @@ func productionDiscoverer(ctx context.Context, token string) (discovery.Result, 
 
 // discoverEntra reads the Entra Agent-ID registry (blueprint, identities, paired
 // users) so init prefills each role's identity fields from what the tenant
-// already has, instead of the operator pasting six GUIDs. A var seam so a test
-// supplies a fake registry with no az/Graph call; production mints a Graph token
-// through the same az session ADO discovery uses. An unreachable registry is
-// best-effort prefill, never fatal — the caller falls back to prompting rather
-// than hard-failing init because Entra is unreachable.
+// already has, instead of the operator pasting six GUIDs. It mints a Graph token
+// pinned to the chosen az account (--subscription accountID, US-0014 F1), so the
+// read targets the account the operator picked without switching az's active
+// login. A var seam so a test supplies a fake registry with no az/Graph call. An
+// unreachable registry is best-effort prefill, never fatal — the caller falls
+// back to prompting rather than hard-failing init because Entra is unreachable.
 var discoverEntra = productionDiscoverEntra
 
-func productionDiscoverEntra(ctx context.Context) (entra.Registry, error) {
-	c, err := entra.New(entra.Config{TokenSource: entra.AzureCLIGraphTokenSource})
+func productionDiscoverEntra(ctx context.Context, accountID string) (entra.Registry, error) {
+	c, err := entra.New(entra.Config{TokenSource: entra.AzureCLIGraphTokenSource(accountID)})
 	if err != nil {
 		return entra.Registry{}, err
 	}
@@ -1030,11 +1148,12 @@ func productionOrgValidator(ctx context.Context, token, org string) error {
 //     config.yaml is not written and the caller returns non-zero.
 //   - a token that reaches org: proceed.
 //
-// The token is minted pinned to tenant (US-0015 AC-15.1), the entra.tenant the
-// interview resolved, so the probe runs against the operator's configured
-// tenant rather than az's ambient default.
-func validateADOBeforeWrite(ctx context.Context, getToken tokenSource, validate orgValidator, tenant, org string, out io.Writer) bool {
-	token, err := getToken(ctx, tenant)
+// The token is minted pinned to the chosen az account (--subscription accountID,
+// US-0015 AC-15.1), so the probe runs against the account the operator picked at
+// the tenant picker without switching az's active login. An empty accountID (an
+// --entra-tenant override, which carries no az account) probes the active account.
+func validateADOBeforeWrite(ctx context.Context, getToken tokenSource, validate orgValidator, accountID, org string, out io.Writer) bool {
+	token, err := getToken(ctx, accountID)
 	if err != nil {
 		fmt.Fprintf(out, "note: could not validate Azure DevOps access (%v); writing config.yaml unvalidated\n", err)
 		return true
@@ -1046,16 +1165,16 @@ func validateADOBeforeWrite(ctx context.Context, getToken tokenSource, validate 
 	return true
 }
 
-// attemptDiscovery gets a token via getToken, pinned to tenant (US-0015
-// AC-15.1), and, on success, runs discover for it. Any failure — the token
-// source itself, or a typed discovery error
+// attemptDiscovery gets a token via getToken, pinned to the chosen az account
+// (--subscription accountID, US-0015 AC-15.1), and, on success, runs discover for
+// it. Any failure — the token source itself, or a typed discovery error
 // (ErrNoOrgReachable, AmbiguousOrgError, APIError, or a transport error) —
 // prints one diagnostic line to iv.w and reports ok=false; discovery is
 // best-effort prefill, never a hard requirement, so this never returns an
 // error itself, and the caller always has a path forward (prompt from
 // scratch through the same helpers the no-discovery path uses).
-func attemptDiscovery(ctx context.Context, iv *interviewer, getToken tokenSource, discover discoverer, tenant string) (result discovery.Result, ok bool) {
-	token, err := getToken(ctx, tenant)
+func attemptDiscovery(ctx context.Context, iv *interviewer, getToken tokenSource, discover discoverer, accountID string) (result discovery.Result, ok bool) {
+	token, err := getToken(ctx, accountID)
 	if err != nil {
 		fmt.Fprintf(iv.w, "note: could not obtain an Azure DevOps token (%v); falling back to manual entry\n", err)
 		return discovery.Result{}, false
@@ -1388,12 +1507,15 @@ func mergeEnvOverPrior(prior *nonInteractiveInput, env nonInteractiveInput) *non
 
 // discoveredPrefill carries the machine-derived defaults a fresh-install
 // interview offers as bracketed prompt values so the operator confirms instead
-// of typing them: the az-session Entra tenant (also the pin for the discovery
-// token, US-0015) and, per role, the agent identity/user read from the Entra
-// registry. Any field left empty — no az session, an unreachable registry, or
-// no registry match for a role — falls back to plain prompting for that field.
+// of typing them: the chosen Entra tenant (the entra.tenant default), the az
+// account that pins every mint (--subscription, US-0015 — distinct from tenant:
+// a tenant that owns subscriptions has account id != tenant id), and, per role,
+// the agent identity/user read from the Entra registry under that account. Any
+// field left empty — no tenant chosen, an unreachable registry, or no registry
+// match for a role — falls back to plain prompting for that field.
 type discoveredPrefill struct {
 	tenant         string
+	accountID      string
 	roleIdentities map[string]roleIdentityPrefill
 }
 
@@ -1408,23 +1530,28 @@ type roleIdentityPrefill struct {
 }
 
 // resolvePrefill gathers the machine-known defaults for a fresh-install
-// interview: the tenant that pins the discovery token (resolved BEFORE any mint,
-// US-0015 AC-15.2) and the per-role Entra identities. Every derivation is
-// best-effort — a field it cannot fill stays empty so the interview prompts for
-// it (US-0015 AC-15.5; auto-derive fallback). A re-run (or any env/disk-seeded
-// prior) is driven by the stored config, not a fresh machine probe: the
-// interview reads its defaults from prior and ignores this prefill, so it
-// derives nothing (and issues no az/Graph call).
-func resolvePrefill(ctx context.Context, prior *nonInteractiveInput) discoveredPrefill {
+// interview: the tenant written to config.entra.tenant and the az account that
+// pins every mint (both chosen BEFORE any mint, US-0015 AC-15.2 — an explicit
+// override, a sole auto-picked tenant, or the operator's pick from the enumerated
+// tenants), plus the per-role Entra identities read from the registry pinned to
+// that account. Every derivation is best-effort — a field it cannot fill stays
+// empty so the interview prompts for it (US-0015 AC-15.5; auto-derive fallback),
+// and with no tenant chosen the registry read is skipped. A re-run (or any
+// env/disk-seeded prior) is driven by the stored config, not a fresh machine
+// probe: the interview reads its defaults from prior and ignores this prefill, so
+// it enumerates nothing (and issues no az/Graph call). reader/out drive the
+// tenant picker over the same buffered stdin the interview then reads from.
+func resolvePrefill(ctx context.Context, reader *bufio.Reader, out io.Writer, prior *nonInteractiveInput, tenantOverride string) discoveredPrefill {
 	if prior != nil {
 		return discoveredPrefill{}
 	}
+	iv := &interviewer{r: reader, w: out}
 	var pf discoveredPrefill
-	if tenant, err := deriveTenant(ctx); err == nil {
-		pf.tenant = tenant
-	}
-	if reg, err := discoverEntra(ctx); err == nil {
-		pf.roleIdentities = roleIdentitiesFromRegistry(reg, "dev", "reviewer")
+	pf.tenant, pf.accountID = chooseTenant(ctx, iv, tenantOverride)
+	if pf.tenant != "" {
+		if reg, err := discoverEntra(ctx, pf.accountID); err == nil {
+			pf.roleIdentities = roleIdentitiesFromRegistry(reg, "dev", "reviewer")
+		}
 	}
 	return pf
 }
@@ -1466,9 +1593,10 @@ func roleIdentitiesFromRegistry(reg entra.Registry, roles ...string) map[string]
 //
 // prior is nil for a fresh install and the reconstructed existing config for a
 // re-run (AC-13.11). On a fresh install it seeds each prompt's default from
-// prefill (the caller-resolved az-session tenant and per-role Entra identities)
-// and, when prefill carries a tenant, mints a tenant-pinned token via getToken
-// (US-0015 AC-15.1/AC-15.2) and runs discover for it (US-0013 AC-13.1): a
+// prefill (the caller-chosen tenant and the per-role Entra identities read under
+// it) and, when prefill carries a tenant, mints a token pinned to the chosen az
+// account (--subscription) via getToken (US-0015 AC-15.1/AC-15.2) and runs
+// discover for it (US-0013 AC-13.1): a
 // successful discovery prefills tracker.org, tracker.project, repo url, and the
 // selected repo's base_branch as confirm-or-override defaults, and any failure
 // (including no resolved tenant, which skips the mint entirely, AC-15.5) falls
@@ -1483,7 +1611,7 @@ func runInteractiveInterview(ctx context.Context, reader *bufio.Reader, out io.W
 	var err error
 
 	// p supplies each field's prompt default: the prior value on a re-run, and on
-	// a fresh install the machine-derived prefill (the az-session tenant and the
+	// a fresh install the machine-derived prefill (the chosen tenant and the
 	// per-role Entra identities) so the operator confirms bracketed defaults
 	// instead of typing GUIDs. A field neither source fills stays "" and
 	// requiredWithDefault degrades to a plain required prompt (AC-13.11;
@@ -1502,14 +1630,16 @@ func runInteractiveInterview(ctx context.Context, reader *bufio.Reader, out io.W
 	var result discovery.Result
 	var discovered bool
 	if prior == nil {
-		// The discovery token is scoped to the resolved tenant (US-0015
-		// AC-15.2); with none resolved (no flag/env, no az session) init skips
-		// discovery rather than minting an unpinned token, and prompts every
-		// field manually (AC-15.5).
+		// The discovery token is pinned to the chosen az account (US-0015
+		// AC-15.2); with no tenant resolved (no flag/env, no az session) init skips
+		// discovery rather than probing an unintended account, and prompts every
+		// field manually (AC-15.5). An --entra-tenant override carries no az
+		// account, so its accountID is "" and discovery runs against the active
+		// account (the operator is expected to have that tenant active).
 		if prefill.tenant != "" {
-			result, discovered = attemptDiscovery(ctx, iv, getToken, discover, prefill.tenant)
+			result, discovered = attemptDiscovery(ctx, iv, getToken, discover, prefill.accountID)
 		} else {
-			fmt.Fprintln(iv.w, "note: no Entra tenant resolved (no flag/env value and no active az session); skipping Azure DevOps discovery to avoid an unpinned token")
+			fmt.Fprintln(iv.w, "note: no Entra tenant resolved (no flag/env value and no active az session); skipping Azure DevOps discovery")
 		}
 	}
 

@@ -26,22 +26,64 @@ const graphPlanBaseURL = "https://graph.microsoft.com/v1.0"
 // heuristic for the reuse report only and never gates or writes.
 var provisionRoles = []string{"dev", "reviewer"}
 
-// graphTokenSource mints the Graph bearer token provision reads under. A
-// package-level var (like init.go's tokenSource seam) so provision_test.go
-// injects a fake with no az shellout; production is the az-backed source.
-var graphTokenSource entra.TokenSource = entra.AzureCLIGraphTokenSource
+// graphTokenSource builds the Graph token source provision reads under, pinned
+// to a resolved az account (--subscription accountID) so the mint targets the
+// chosen account without switching az's active login — the pin that works where
+// --tenant would force a fresh interactive login (US-0014 F1; live probe
+// 2026-07-17). A package-level factory var (like init.go's tokenSource seam) so
+// provision_test.go injects a fake with no az shellout; production is the
+// az-backed source.
+var graphTokenSource = entra.AzureCLIGraphTokenSource
+
+// deriveProvisionAccount resolves the az account (subscription) every provision
+// mint pins to when --subscription is absent: the active az session's account id
+// (NOT its tenant id — --subscription needs an account id, and a tenant that owns
+// subscriptions has account id != tenant id). Read explicitly so the Graph and
+// sponsor calls pin the same value per invocation rather than inheriting az's
+// non-sticky ambient default (pilot F4). A package-level seam so a test resolves
+// it with no az shellout; --subscription overrides it.
+var deriveProvisionAccount = func(ctx context.Context) (string, error) {
+	out, err := exec.CommandContext(ctx, "az", "account", "show", "--query", "id", "-o", "tsv").Output()
+	if err != nil {
+		return "", fmt.Errorf("az account show: %w", err)
+	}
+	account := strings.TrimSpace(string(out))
+	if account == "" {
+		return "", errors.New("az account show returned no account id")
+	}
+	return account, nil
+}
 
 // deriveSponsor resolves the default sponsor object id for a created agent
-// identity — the signed-in az user. A package-level seam (like graphTokenSource)
-// so provision_test.go injects a fake with no az shellout; production shells az.
-// A created identity is sponsored by a named human (the Mandate invariant); the
-// operator can override the default with --sponsor.
-var deriveSponsor = func(ctx context.Context) (string, error) {
-	out, err := exec.CommandContext(ctx, "az", "ad", "signed-in-user", "show", "--query", "id", "-o", "tsv").Output()
+// identity — the signed-in az user. It best-effort pins the lookup to the chosen
+// account (--subscription accountID), but az ad signed-in-user show follows the az
+// LOGIN context, so when the pinned account is not the active login it resolves
+// the wrong user; pass --sponsor explicitly in that case (the flag help says so).
+// A package-level seam (like graphTokenSource) so provision_test.go injects a fake
+// with no az shellout; production shells az. A created identity is sponsored by a
+// named human (the Mandate invariant); the operator can override with --sponsor.
+var deriveSponsor = func(ctx context.Context, accountID string) (string, error) {
+	args := []string{"ad", "signed-in-user", "show", "--query", "id", "-o", "tsv"}
+	if accountID != "" {
+		args = append(args, "--subscription", accountID)
+	}
+	out, err := exec.CommandContext(ctx, "az", args...).Output()
 	if err != nil {
 		return "", fmt.Errorf("az ad signed-in-user show: %w", err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// resolveProvisionAccount is the az account every provision mint pins to: the
+// explicit --subscription flag when set, else the active account
+// deriveProvisionAccount reads. Overridable by construction, and never left
+// unresolved — an unpinned Graph mint would silently target az's active account
+// even when the operator meant another (US-0014 F1).
+func resolveProvisionAccount(ctx context.Context, accountFlag string) (string, error) {
+	if a := strings.TrimSpace(accountFlag); a != "" {
+		return a, nil
+	}
+	return deriveProvisionAccount(ctx)
 }
 
 // provision runs US-0014's ensure-read (reuse) path: it discovers the Entra
@@ -56,21 +98,32 @@ func provision(args []string, stdout, stderr io.Writer) int {
 	dryRun := fs.Bool("dry-run", false, "print the plan for any absent blueprint/role identity (or the ensure-identity POST); still issues zero writes")
 	graphURL := fs.String("graph-url", "", "override the Microsoft Graph base URL (test seam)")
 	ensureIdentity := fs.String("ensure-identity", "", "idempotently ensure an agent identity with this displayName exists under the blueprint; prints the POST before issuing it")
-	sponsor := fs.String("sponsor", "", "sponsor object id(s) for a created agent identity (comma-separated); default = the signed-in az user")
+	ensureBlueprint := fs.String("ensure-blueprint", "", "idempotently ensure the installation's agent-identity blueprint (and its principal) with this displayName exists; prints the POST(s) before issuing them (needs the Agent ID Developer/Administrator role)")
+	sponsor := fs.String("sponsor", "", "sponsor object id(s) for a created agent identity (comma-separated); default = the signed-in az user (pass this explicitly when --subscription pins an account other than your active az login, since az ad signed-in-user follows the login context)")
+	subscription := fs.String("subscription", "", "az account/subscription id to pin every az mint to (Graph token via --subscription, sponsor lookup); default = the active az account (az account show --query id)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
-	client, err := entra.New(entra.Config{GraphBaseURL: *graphURL, TokenSource: graphTokenSource})
+	ctx := context.Background()
+
+	resolvedAccount, err := resolveProvisionAccount(ctx, *subscription)
+	if err != nil {
+		fmt.Fprintf(stderr, "mandat provision: resolve az account: %v\n", err)
+		return 1
+	}
+
+	client, err := entra.New(entra.Config{GraphBaseURL: *graphURL, TokenSource: graphTokenSource(resolvedAccount)})
 	if err != nil {
 		fmt.Fprintf(stderr, "mandat provision: %v\n", err)
 		return 1
 	}
 
-	ctx := context.Background()
 	switch {
+	case *ensureBlueprint != "":
+		return runEnsureBlueprint(ctx, client, *ensureBlueprint, *sponsor, resolvedAccount, *dryRun, stdout, stderr)
 	case *ensureIdentity != "":
-		return runEnsureIdentity(ctx, client, *ensureIdentity, *sponsor, *dryRun, stdout, stderr)
+		return runEnsureIdentity(ctx, client, *ensureIdentity, *sponsor, resolvedAccount, *dryRun, stdout, stderr)
 	}
 
 	reg, err := client.DiscoverRegistry(ctx)
@@ -93,8 +146,8 @@ func provision(args []string, stdout, stderr io.Writer) int {
 // (list-then-create, AC-14.3) and reports created-vs-reused. A *PrivilegeError
 // (the write returned 403) prints the fail-with-guidance line and exits
 // non-zero-but-clean, never a raw Graph 403 dump (AC-14.4).
-func runEnsureIdentity(ctx context.Context, client *entra.Client, displayName, sponsorFlag string, dryRun bool, stdout, stderr io.Writer) int {
-	sponsors, err := resolveSponsors(ctx, sponsorFlag)
+func runEnsureIdentity(ctx context.Context, client *entra.Client, displayName, sponsorFlag, accountID string, dryRun bool, stdout, stderr io.Writer) int {
+	sponsors, err := resolveSponsors(ctx, sponsorFlag, accountID)
 	if err != nil {
 		fmt.Fprintf(stderr, "mandat provision: resolve sponsor: %v\n", err)
 		return 1
@@ -159,11 +212,81 @@ func runEnsureIdentity(ctx context.Context, client *entra.Client, displayName, s
 	return 0
 }
 
+// runEnsureBlueprint runs US-0014's ensure-blueprint write (AC-14.2). It resolves
+// the sponsoring human(s), prints the exact create POST(s) — the blueprint and
+// its principal, full bodies including the sponsor @odata.bind list — before
+// issuing them (AC-14.7), then, unless dryRun, ensures the single installation
+// blueprint exists idempotently (list-then-create) and reports created-vs-reused
+// with the appId config.yaml records. A *PrivilegeError (a 403 on either write —
+// the blueprint create needs the Agent ID Developer or Administrator role) prints
+// the fail-with-guidance line and exits non-zero-but-clean, never a raw Graph 403
+// dump (AC-14.2/AC-14.4).
+func runEnsureBlueprint(ctx context.Context, client *entra.Client, displayName, sponsorFlag, accountID string, dryRun bool, stdout, stderr io.Writer) int {
+	sponsors, err := resolveSponsors(ctx, sponsorFlag, accountID)
+	if err != nil {
+		fmt.Fprintf(stderr, "mandat provision: resolve sponsor: %v\n", err)
+		return 1
+	}
+
+	blueprintCall, err := client.BlueprintCreateCall(displayName, sponsors)
+	if err != nil {
+		fmt.Fprintf(stderr, "mandat provision: %v\n", err)
+		return 1
+	}
+	// The principal binds to the appId the blueprint create returns — unknown
+	// until that first POST runs — so the preview prints a placeholder appId.
+	principalCall, err := client.BlueprintPrincipalCreateCall("<blueprint-appId-from-the-create-above>")
+	if err != nil {
+		fmt.Fprintf(stderr, "mandat provision: %v\n", err)
+		return 1
+	}
+
+	// AC-14.7: print the exact mutations before issuing. Both POSTs are sent only
+	// when no blueprint exists; on a reuse neither is sent.
+	for _, call := range []entra.WriteCall{blueprintCall, principalCall} {
+		fmt.Fprintf(stdout, "WRITE (issued only if no blueprint exists): %s %s\n", call.Method, call.Endpoint)
+		fmt.Fprintf(stdout, "    body: %s\n", call.Body)
+	}
+
+	if dryRun {
+		existing, err := client.ListBlueprints(ctx)
+		if err != nil {
+			fmt.Fprintf(stderr, "mandat provision: list blueprints: %v\n", err)
+			return 1
+		}
+		if len(existing) > 0 {
+			fmt.Fprintf(stdout, "PLAN (dry-run, no write): a blueprint already exists (appId %s); ensure would reuse it and issue zero writes.\n", existing[0].AppID)
+			return 0
+		}
+		fmt.Fprintln(stdout, "PLAN (dry-run, no write): no blueprint exists; ensure would issue the POST(s) above. Issued zero writes.")
+		return 0
+	}
+
+	bp, created, err := client.EnsureBlueprint(ctx, displayName, sponsors)
+	if err != nil {
+		var privErr *entra.PrivilegeError
+		if errors.As(err, &privErr) {
+			fmt.Fprintf(stderr, "mandat provision: %v\n", privErr)
+			fmt.Fprintln(stderr, "  Fix: grant the Agent ID Developer or Administrator role, or run the write through Entra PowerShell (Connect-Entra -Scopes AgentIdentityBlueprint.Create), then retry.")
+			return 1
+		}
+		fmt.Fprintf(stderr, "mandat provision: ensure blueprint %q: %v\n", displayName, err)
+		return 1
+	}
+
+	if created {
+		fmt.Fprintf(stdout, "created agent-identity blueprint %q (appId %s).\n", bp.DisplayName, bp.AppID)
+	} else {
+		fmt.Fprintf(stdout, "reused existing agent-identity blueprint %q (appId %s); no write issued.\n", bp.DisplayName, bp.AppID)
+	}
+	return 0
+}
+
 // resolveSponsors returns the sponsor object ids for a created agent identity:
 // the explicit --sponsor ids (comma-separated) when set, else the single
 // signed-in az user from deriveSponsor. The owner requires sponsor ids be
 // overridable (US-0014), so the flag wins over the derived default.
-func resolveSponsors(ctx context.Context, sponsorFlag string) ([]string, error) {
+func resolveSponsors(ctx context.Context, sponsorFlag, accountID string) ([]string, error) {
 	if strings.TrimSpace(sponsorFlag) != "" {
 		var sponsors []string
 		for _, p := range strings.Split(sponsorFlag, ",") {
@@ -177,7 +300,7 @@ func resolveSponsors(ctx context.Context, sponsorFlag string) ([]string, error) 
 		return sponsors, nil
 	}
 
-	id, err := deriveSponsor(ctx)
+	id, err := deriveSponsor(ctx, accountID)
 	if err != nil {
 		return nil, err
 	}

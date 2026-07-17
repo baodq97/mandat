@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -297,6 +299,71 @@ func TestNew_RejectsInvalidBaseURL(t *testing.T) {
 	}
 }
 
+// writeFakeAz writes a fake az onto a fresh dir prepended to PATH: it records its
+// argument list to argsFile and prints a token, so a test drives the real Graph
+// token source with no live az and inspects exactly what was invoked. The caller
+// runs non-parallel: it mutates PATH via t.Setenv.
+func writeFakeAz(t *testing.T) (argsFile string) {
+	t.Helper()
+	dir := t.TempDir()
+	argsFile = filepath.Join(dir, "args.txt")
+	script := "#!/bin/sh\nprintf '%s' \"$*\" > '" + argsFile + "'\nprintf 'fake-token\\n'\n"
+	if err := os.WriteFile(filepath.Join(dir, "az"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake az: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return argsFile
+}
+
+// TestAzureCLIGraphTokenSource_PinsSubscriptionFlag proves the Graph mint carries
+// --subscription <az account id> (US-0014 F1) — the pin that works without a
+// re-login, unlike --tenant. With a fake az on PATH, the produced token source's
+// argument list includes the pin; dropping --subscription reproduces a failing
+// test, not a silent pass. Not parallel: mutates PATH.
+func TestAzureCLIGraphTokenSource_PinsSubscriptionFlag(t *testing.T) {
+	argsFile := writeFakeAz(t)
+
+	token, err := AzureCLIGraphTokenSource("graph-account-id")(context.Background())
+	if err != nil {
+		t.Fatalf("token source error = %v, want nil", err)
+	}
+	if token != "fake-token" {
+		t.Errorf("token = %q, want the fake az output", token)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read captured args: %v", err)
+	}
+	if !strings.Contains(string(args), "--subscription graph-account-id") {
+		t.Errorf("az args = %q, want them to carry --subscription graph-account-id (US-0014 F1)", string(args))
+	}
+	if strings.Contains(string(args), "--tenant") {
+		t.Errorf("az args = %q, want no --tenant (it forces a re-login; --subscription pins instead)", string(args))
+	}
+	if !strings.Contains(string(args), "--resource "+graphResource) {
+		t.Errorf("az args = %q, want the pinned Graph --resource still present", string(args))
+	}
+}
+
+// TestAzureCLIGraphTokenSource_EmptyAccount_OmitsFlag proves the guard: with no
+// account the source omits --subscription rather than passing --subscription ""
+// (a caller with no resolved account falls back to az's active account, never a
+// broken flag). Not parallel: mutates PATH.
+func TestAzureCLIGraphTokenSource_EmptyAccount_OmitsFlag(t *testing.T) {
+	argsFile := writeFakeAz(t)
+
+	if _, err := AzureCLIGraphTokenSource("")(context.Background()); err != nil {
+		t.Fatalf("token source error = %v, want nil", err)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read captured args: %v", err)
+	}
+	if strings.Contains(string(args), "--subscription") {
+		t.Errorf("az args = %q, want no --subscription flag for an empty account", string(args))
+	}
+}
+
 func reqByPathSuffix(t *testing.T, reqs []capturedReq, suffix string) capturedReq {
 	t.Helper()
 	for _, r := range reqs {
@@ -314,8 +381,9 @@ func reqByPathSuffix(t *testing.T, reqs []capturedReq, suffix string) capturedRe
 // *PrivilegeError mapping offline, with no az shellout and no real token.
 
 // writeGraph records each request and serves the Agent-ID write endpoints: a
-// canned identity list on the GET read, and scripted status+body on the create
-// POST and the delete DELETE.
+// canned identity/blueprint list on the GET reads, and scripted status+body on
+// the create POSTs (identity, blueprint, blueprint principal) and the delete
+// DELETE.
 type writeGraph struct {
 	mu       sync.Mutex
 	requests []capturedReq
@@ -325,6 +393,12 @@ type writeGraph struct {
 	createBody   string
 	deleteStatus int
 	deleteBody   string
+
+	blueprintsBody        string
+	blueprintCreateStatus int
+	blueprintCreateBody   string
+	principalCreateStatus int
+	principalCreateBody   string
 }
 
 func (g *writeGraph) start(t *testing.T) *httptest.Server {
@@ -343,6 +417,14 @@ func (g *writeGraph) start(t *testing.T) *httptest.Server {
 
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/applications/microsoft.graph.agentIdentityBlueprint"):
+			_, _ = w.Write([]byte(g.blueprintsBody))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/applications/microsoft.graph.agentIdentityBlueprint"):
+			w.WriteHeader(g.blueprintCreateStatus)
+			_, _ = w.Write([]byte(g.blueprintCreateBody))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/servicePrincipals/microsoft.graph.agentIdentityBlueprintPrincipal"):
+			w.WriteHeader(g.principalCreateStatus)
+			_, _ = w.Write([]byte(g.principalCreateBody))
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/servicePrincipals/microsoft.graph.agentIdentity"):
 			_, _ = w.Write([]byte(g.listBody))
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/servicePrincipals/microsoft.graph.agentIdentity"):
@@ -479,4 +561,132 @@ func TestCreateAgentIdentity_Forbidden_ReturnsPrivilegeError(t *testing.T) {
 	if errors.As(err, &apiErr) {
 		t.Errorf("403 also matched *APIError (%v); a forbidden write must be a *PrivilegeError only", apiErr)
 	}
+}
+
+func TestEnsureBlueprint_ExistingBlueprint_ReusesWithoutWrite(t *testing.T) {
+	t.Parallel()
+
+	fake := &writeGraph{
+		blueprintsBody: `{"value":[{"id":"bp-object-01","appId":"appid-blueprint-01","displayName":"mandat-spike-blueprint"}]}`,
+	}
+	srv := fake.start(t)
+	tokens := &fakeTokenSource{token: testToken}
+	c := newClient(t, srv, tokens)
+
+	// The passed displayName differs from the existing blueprint's: an
+	// installation owns at most one, so reuse is by existence, not name match.
+	bp, created, err := c.EnsureBlueprint(context.Background(), "mandat-blueprint", []string{"sponsor-01"})
+	if err != nil {
+		t.Fatalf("EnsureBlueprint() error = %v, want nil", err)
+	}
+	if created {
+		t.Error("created = true, want false when a blueprint already exists")
+	}
+	if bp.AppID != "appid-blueprint-01" {
+		t.Errorf("blueprint.AppID = %q, want appid-blueprint-01 (the existing one)", bp.AppID)
+	}
+	// Reuse issues the list GET and no write.
+	for _, r := range fake.recorded() {
+		if r.method != http.MethodGet {
+			t.Errorf("recorded a %s request; reuse must issue only the list GET", r.method)
+		}
+	}
+}
+
+func TestEnsureBlueprint_AbsentBlueprint_CreatesBlueprintThenPrincipal(t *testing.T) {
+	t.Parallel()
+
+	fake := &writeGraph{
+		blueprintsBody:        `{"value":[]}`,
+		blueprintCreateStatus: http.StatusCreated,
+		blueprintCreateBody:   `{"id":"bp-object-99","appId":"appid-blueprint-99","displayName":"mandat-blueprint"}`,
+		principalCreateStatus: http.StatusCreated,
+		principalCreateBody:   `{"id":"principal-99","appId":"appid-blueprint-99"}`,
+	}
+	srv := fake.start(t)
+	tokens := &fakeTokenSource{token: testToken}
+	c := newClient(t, srv, tokens)
+
+	bp, created, err := c.EnsureBlueprint(context.Background(), "mandat-blueprint", []string{"sponsor-99"})
+	if err != nil {
+		t.Fatalf("EnsureBlueprint() error = %v, want nil", err)
+	}
+	if !created {
+		t.Error("created = false, want true when no blueprint exists")
+	}
+	if bp.AppID != "appid-blueprint-99" || bp.DisplayName != "mandat-blueprint" {
+		t.Errorf("blueprint = %+v, want the created appid-blueprint-99/mandat-blueprint", bp)
+	}
+
+	// The ensure lists (GET) then POSTs the blueprint; the POST carries the bearer
+	// token, its displayName, and a non-empty sponsors@odata.bind (same bind form
+	// as the identity create).
+	reqs := fake.recorded()
+	blueprintPost := postByPathSuffix(t, reqs, "/applications/microsoft.graph.agentIdentityBlueprint")
+	if blueprintPost.authz != "Bearer "+testToken {
+		t.Errorf("blueprint POST authz = %q, want the minted bearer token", blueprintPost.authz)
+	}
+	for _, want := range []string{
+		`"displayName":"mandat-blueprint"`,
+		`"sponsors@odata.bind":[`,
+		"/users/sponsor-99",
+	} {
+		if !strings.Contains(blueprintPost.body, want) {
+			t.Errorf("blueprint POST body missing %q\n%s", want, blueprintPost.body)
+		}
+	}
+
+	// The principal create threads the appId the blueprint create returned — and
+	// its body is just {appId}, nothing else (the shape the research doc pins).
+	principalPost := postByPathSuffix(t, reqs, "/servicePrincipals/microsoft.graph.agentIdentityBlueprintPrincipal")
+	if principalPost.body != `{"appId":"appid-blueprint-99"}` {
+		t.Errorf("principal POST body = %q, want exactly {\"appId\":\"appid-blueprint-99\"}", principalPost.body)
+	}
+}
+
+func TestCreateBlueprint_Forbidden_ReturnsPrivilegeError(t *testing.T) {
+	t.Parallel()
+
+	fake := &writeGraph{
+		blueprintCreateStatus: http.StatusForbidden,
+		blueprintCreateBody:   `{"error":{"code":"Authorization_RequestDenied","message":"Insufficient privileges"}}`,
+	}
+	srv := fake.start(t)
+	tokens := &fakeTokenSource{token: testToken}
+	c := newClient(t, srv, tokens)
+
+	_, err := c.CreateBlueprint(context.Background(), "mandat-blueprint", []string{"sponsor-01"})
+	if err == nil {
+		t.Fatal("CreateBlueprint() error = nil, want a 403 privilege failure")
+	}
+	var privErr *PrivilegeError
+	if !errors.As(err, &privErr) {
+		t.Fatalf("CreateBlueprint() error = %v, want errors.As to *PrivilegeError", err)
+	}
+	if privErr.Method != http.MethodPost {
+		t.Errorf("PrivilegeError.Method = %q, want POST", privErr.Method)
+	}
+	if !strings.HasSuffix(privErr.Endpoint, "/applications/microsoft.graph.agentIdentityBlueprint") {
+		t.Errorf("PrivilegeError.Endpoint = %q, want the blueprint create endpoint", privErr.Endpoint)
+	}
+	// The message names the Agent ID role the blueprint create needs (AC-14.2).
+	if !strings.Contains(privErr.Error(), "Agent ID Developer") {
+		t.Errorf("PrivilegeError message %q does not name the Agent ID Developer/Administrator role", privErr.Error())
+	}
+	// A forbidden write is a *PrivilegeError, never also a plain *APIError.
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		t.Errorf("403 also matched *APIError (%v); a forbidden write must be a *PrivilegeError only", apiErr)
+	}
+}
+
+func postByPathSuffix(t *testing.T, reqs []capturedReq, suffix string) capturedReq {
+	t.Helper()
+	for _, r := range reqs {
+		if r.method == http.MethodPost && strings.HasSuffix(r.path, suffix) {
+			return r
+		}
+	}
+	t.Fatalf("no recorded POST with path suffix %q", suffix)
+	return capturedReq{}
 }
