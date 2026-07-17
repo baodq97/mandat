@@ -201,8 +201,25 @@ func TestInitCmd_NonInteractive_HappyPathEmitAndReload(t *testing.T) {
 // TestInitCmd_MissingRequiredFlag proves AC-13.9's contract for every
 // irreducible flag: dropping it from an otherwise-valid invocation errors
 // naming that exact flag, exits non-zero, and writes nothing.
+// clearInitEnv blanks every MANDAT_* var init reads (AC-13.10), so a test that
+// omits a required flag observes it as truly absent rather than env-filled. Uses
+// t.Setenv, so callers cannot be t.Parallel.
+func clearInitEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{
+		"MANDAT_TRACKER_ORG", "MANDAT_TRACKER_PROJECT", "MANDAT_TRACKER_IN_PROGRESS_STATE",
+		"MANDAT_AUTH_MODE", "MANDAT_ENTRA_TENANT", "MANDAT_ENTRA_BLUEPRINT",
+		"MANDAT_REPO", "MANDAT_BASE_BRANCH", "MANDAT_REMIT_PATHS", "MANDAT_GATES",
+		"MANDAT_DEV_IDENTITY_ID", "MANDAT_DEV_USER_ID", "MANDAT_DEV_USER_UPN",
+		"MANDAT_REVIEWER_IDENTITY_ID", "MANDAT_REVIEWER_USER_ID", "MANDAT_REVIEWER_USER_UPN",
+		"MANDAT_AUTONOMY_CEILING", "MANDAT_MAX_USD_PER_RUN", "MANDAT_POOL_SIZE",
+	} {
+		t.Setenv(k, "")
+	}
+}
+
 func TestInitCmd_MissingRequiredFlag(t *testing.T) {
-	t.Parallel()
+	clearInitEnv(t)
 
 	flags := []string{
 		"--tracker-org", "--tracker-project", "--auth-mode",
@@ -214,8 +231,6 @@ func TestInitCmd_MissingRequiredFlag(t *testing.T) {
 
 	for _, flagName := range flags {
 		t.Run(flagName, func(t *testing.T) {
-			t.Parallel()
-
 			configPath := filepath.Join(t.TempDir(), "config.yaml")
 			args := removeFlag(validInitArgs(configPath), flagName)
 
@@ -237,8 +252,6 @@ func TestInitCmd_MissingRequiredFlag(t *testing.T) {
 	// occurrences, not a single flag=value pair removeFlag can strip.
 	for _, repeatable := range []string{"--remit-path", "--gate"} {
 		t.Run(repeatable, func(t *testing.T) {
-			t.Parallel()
-
 			configPath := filepath.Join(t.TempDir(), "config.yaml")
 			args := removeFlag(removeFlag(validInitArgs(configPath), repeatable), repeatable)
 
@@ -1558,5 +1571,124 @@ func TestValidateADOBeforeWrite_NoToken_ProceedsUnvalidated(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "unvalidated") {
 		t.Errorf("out = %q, want the unvalidated note", out.String())
+	}
+}
+
+// TestInitCmd_NonInteractive_FlagBeatsEnv proves AC-13.10's flags > env
+// precedence: with MANDAT_TRACKER_ORG set AND --tracker-org supplied, the flag
+// value is what lands in config.yaml. Not parallel: t.Setenv forbids it.
+func TestInitCmd_NonInteractive_FlagBeatsEnv(t *testing.T) {
+	stubPassPreflight(t)
+	t.Setenv("MANDAT_TRACKER_ORG", "envorg")
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	var stdout, stderr strings.Builder
+	code := initCmd(validInitArgs(configPath), strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("initCmd() code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("config.Load(%q) error = %v, want nil", configPath, err)
+	}
+	if cfg.Tracker.Org != "baodo0220" {
+		t.Errorf("Tracker.Org = %q, want the flag value %q (flags > env, not the env %q)", cfg.Tracker.Org, "baodo0220", "envorg")
+	}
+}
+
+// TestInitCmd_NonInteractive_EnvFillsOmittedFlag proves AC-13.10's env
+// fallback: with --tracker-org omitted but MANDAT_TRACKER_ORG set, the env
+// value fills the unset flag and lands in config.yaml. Not parallel: t.Setenv.
+func TestInitCmd_NonInteractive_EnvFillsOmittedFlag(t *testing.T) {
+	stubPassPreflight(t)
+	t.Setenv("MANDAT_TRACKER_ORG", "envorg")
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	args := removeFlag(validInitArgs(configPath), "--tracker-org")
+	var stdout, stderr strings.Builder
+	code := initCmd(args, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("initCmd() code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("config.Load(%q) error = %v, want nil", configPath, err)
+	}
+	if cfg.Tracker.Org != "envorg" {
+		t.Errorf("Tracker.Org = %q, want the env value %q filling the omitted --tracker-org", cfg.Tracker.Org, "envorg")
+	}
+}
+
+// TestMergeEnvOverPrior_EnvBeatsExistingConfig proves AC-13.10's env > existing
+// config on an interactive re-run: a set MANDAT_* var overrides the on-disk
+// value in the reconstructed prior, while a field with no env var keeps what
+// the config held (so an untouched field stays byte-identical, AC-13.11). Not
+// parallel: t.Setenv.
+func TestMergeEnvOverPrior_EnvBeatsExistingConfig(t *testing.T) {
+	disk := validNonInteractiveInput()
+	disk.trackerOrg = "diskorg"
+	a := disk.render()
+
+	prior, ok := reconstructPriorInput([]byte(a))
+	if !ok {
+		t.Fatal("reconstructPriorInput() ok = false, want true for an init-written config")
+	}
+
+	t.Setenv("MANDAT_TRACKER_ORG", "envorg")
+	merged := mergeEnvOverPrior(&prior, envInput())
+	if merged == nil {
+		t.Fatal("mergeEnvOverPrior() = nil, want a merged prior")
+	}
+	if merged.trackerOrg != "envorg" {
+		t.Errorf("merged.trackerOrg = %q, want the env value %q beating the on-disk %q", merged.trackerOrg, "envorg", "diskorg")
+	}
+	if merged.trackerProject != disk.trackerProject {
+		t.Errorf("merged.trackerProject = %q, want the on-disk %q (no env var set, prior kept)", merged.trackerProject, disk.trackerProject)
+	}
+}
+
+// TestEnvInput_ParsesListsNumbersAndRepo proves envInput's non-trivial parses
+// (AC-13.10): comma lists trim and drop empties, the repo key=url form splits,
+// and the numerics parse to their typed values. Not parallel: t.Setenv.
+func TestEnvInput_ParsesListsNumbersAndRepo(t *testing.T) {
+	t.Setenv("MANDAT_REMIT_PATHS", "a, b ,c")
+	t.Setenv("MANDAT_GATES", "make check, npx govkit check")
+	t.Setenv("MANDAT_REPO", "mandat=https://example.test/_git/mandat")
+	t.Setenv("MANDAT_MAX_USD_PER_RUN", "7.5")
+	t.Setenv("MANDAT_POOL_SIZE", "4")
+
+	env := envInput()
+	if got, want := env.remitPaths, []string{"a", "b", "c"}; !slices.Equal(got, want) {
+		t.Errorf("remitPaths = %v, want %v (comma-split, trimmed, empties dropped)", got, want)
+	}
+	if got, want := env.gates, []string{"make check", "npx govkit check"}; !slices.Equal(got, want) {
+		t.Errorf("gates = %v, want %v", got, want)
+	}
+	if env.repoKey != "mandat" || env.repoURL != "https://example.test/_git/mandat" {
+		t.Errorf("repo = %q / %q, want the key=url split of MANDAT_REPO", env.repoKey, env.repoURL)
+	}
+	if env.maxUSDPerRun != 7.5 {
+		t.Errorf("maxUSDPerRun = %v, want 7.5", env.maxUSDPerRun)
+	}
+	if env.poolSize != 4 {
+		t.Errorf("poolSize = %d, want 4", env.poolSize)
+	}
+}
+
+// TestEnvInput_BadNumericSkipped proves AC-13.10's bad-numeric handling: an
+// unparseable MANDAT_MAX_USD_PER_RUN or MANDAT_POOL_SIZE is skipped (the field
+// stays at its zero value), never fatal. Not parallel: t.Setenv.
+func TestEnvInput_BadNumericSkipped(t *testing.T) {
+	t.Setenv("MANDAT_MAX_USD_PER_RUN", "not-a-float")
+	t.Setenv("MANDAT_POOL_SIZE", "not-an-int")
+
+	env := envInput()
+	if env.maxUSDPerRun != 0 {
+		t.Errorf("maxUSDPerRun = %v, want 0 (a bad float is skipped, not fatal)", env.maxUSDPerRun)
+	}
+	if env.poolSize != 0 {
+		t.Errorf("poolSize = %d, want 0 (a bad int is skipped, not fatal)", env.poolSize)
 	}
 }

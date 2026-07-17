@@ -152,6 +152,11 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 				prior = &reconstructed
 			}
 		}
+		// A set MANDAT_* var overrides the stored value and becomes the prompt's
+		// bracketed default (AC-13.10, env > existing config); with no config on
+		// disk an env-derived prior still seeds the interview, otherwise prior
+		// stays nil and the fresh-install discovery path runs.
+		prior = mergeEnvOverPrior(prior, envInput())
 		interviewed, err := runInteractiveInterview(context.Background(), reader, stdout, azCLITokenSource, productionDiscoverer, prior)
 		if err != nil {
 			fmt.Fprintf(stderr, "mandat init: %v\n", err)
@@ -198,6 +203,10 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 		installSystemdUnit: *installSystemdUnit,
 	}
+
+	// Flags win; each field a flag left empty falls back to its MANDAT_* env
+	// value before validation (AC-13.10, flags > env).
+	mergeEnvIntoUnset(&in, envInput())
 
 	if err := in.validate(); err != nil {
 		fmt.Fprintf(stderr, "mandat init: %v\n", err)
@@ -1101,6 +1110,203 @@ func reconstructPriorInput(existing []byte) (nonInteractiveInput, bool) {
 	}
 
 	return in, true
+}
+
+// splitCommaList splits a MANDAT_* comma-separated env value (remit paths,
+// gates) into entries, trimming surrounding spaces and dropping empties, so
+// "a, b ,c" yields the same list the repeatable --remit-path/--gate flags
+// collect from separate occurrences.
+func splitCommaList(v string) []string {
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+// envInput reads every MANDAT_* init input from the environment into the shared
+// nonInteractiveInput shape (AC-13.10). The vars carry NON-SECRET config fields
+// only: init never takes a secret as input, so there is deliberately no var for
+// a client secret or token, and config.yaml stays the sole runtime source —
+// serve reads governed settings (remits, ceilings) from disk, never from the
+// environment. Env feeds only the interview and the flag fallback here, so a
+// var left unset (or, for the numerics, unparseable) stays at its zero value
+// and the two merges below treat it as "not supplied".
+func envInput() nonInteractiveInput {
+	var in nonInteractiveInput
+	in.trackerOrg = os.Getenv("MANDAT_TRACKER_ORG")
+	in.trackerProject = os.Getenv("MANDAT_TRACKER_PROJECT")
+	in.inProgressState = os.Getenv("MANDAT_TRACKER_IN_PROGRESS_STATE")
+	in.authMode = os.Getenv("MANDAT_AUTH_MODE")
+	in.entraTenant = os.Getenv("MANDAT_ENTRA_TENANT")
+	in.entraBlueprint = os.Getenv("MANDAT_ENTRA_BLUEPRINT")
+	in.baseBranch = os.Getenv("MANDAT_BASE_BRANCH")
+	in.devIdentityID = os.Getenv("MANDAT_DEV_IDENTITY_ID")
+	in.devUserID = os.Getenv("MANDAT_DEV_USER_ID")
+	in.devUserUPN = os.Getenv("MANDAT_DEV_USER_UPN")
+	in.reviewerIdentityID = os.Getenv("MANDAT_REVIEWER_IDENTITY_ID")
+	in.reviewerUserID = os.Getenv("MANDAT_REVIEWER_USER_ID")
+	in.reviewerUserUPN = os.Getenv("MANDAT_REVIEWER_USER_UPN")
+	in.autonomyCeiling = os.Getenv("MANDAT_AUTONOMY_CEILING")
+
+	// MANDAT_REPO mirrors --repo's key=url form; splitting it here lets the
+	// interactive merge offer key and url as their own prompt defaults, while
+	// the non-interactive path re-derives them from repoRaw in validate.
+	if v := os.Getenv("MANDAT_REPO"); v != "" {
+		in.repoRaw = v
+		if key, url, ok := strings.Cut(v, "="); ok && key != "" && url != "" {
+			in.repoKey, in.repoURL = key, url
+		}
+	}
+	if v := os.Getenv("MANDAT_REMIT_PATHS"); v != "" {
+		in.remitPaths = splitCommaList(v)
+	}
+	if v := os.Getenv("MANDAT_GATES"); v != "" {
+		in.gates = splitCommaList(v)
+	}
+	// A malformed numeric is skipped, not fatal: env is best-effort prefill, so
+	// the field stays unset and validate (non-interactive) or the prompt
+	// (interactive) still demands a good value.
+	if v := os.Getenv("MANDAT_MAX_USD_PER_RUN"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			in.maxUSDPerRun = f
+		}
+	}
+	if v := os.Getenv("MANDAT_POOL_SIZE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			in.poolSize = n
+		}
+	}
+	return in
+}
+
+// mergeEnvIntoUnset fills every field the flag parse left empty from its
+// MANDAT_* env value, realizing flags > env on the --non-interactive path
+// (AC-13.10): a flag the operator passed wins, an omitted one falls back to the
+// environment. It runs after the flag build and before validate, so a repoRaw
+// sourced from MANDAT_REPO still flows through validate's key=url parse
+// (repoKey/repoURL are left for validate to derive, never copied here).
+func mergeEnvIntoUnset(in *nonInteractiveInput, env nonInteractiveInput) {
+	if in.trackerOrg == "" {
+		in.trackerOrg = env.trackerOrg
+	}
+	if in.trackerProject == "" {
+		in.trackerProject = env.trackerProject
+	}
+	if in.inProgressState == "" {
+		in.inProgressState = env.inProgressState
+	}
+	if in.authMode == "" {
+		in.authMode = env.authMode
+	}
+	if in.entraTenant == "" {
+		in.entraTenant = env.entraTenant
+	}
+	if in.entraBlueprint == "" {
+		in.entraBlueprint = env.entraBlueprint
+	}
+	if in.repoRaw == "" {
+		in.repoRaw = env.repoRaw
+	}
+	if in.baseBranch == "" {
+		in.baseBranch = env.baseBranch
+	}
+	if len(in.remitPaths) == 0 {
+		in.remitPaths = env.remitPaths
+	}
+	if len(in.gates) == 0 {
+		in.gates = env.gates
+	}
+	if in.devIdentityID == "" {
+		in.devIdentityID = env.devIdentityID
+	}
+	if in.devUserID == "" {
+		in.devUserID = env.devUserID
+	}
+	if in.devUserUPN == "" {
+		in.devUserUPN = env.devUserUPN
+	}
+	if in.reviewerIdentityID == "" {
+		in.reviewerIdentityID = env.reviewerIdentityID
+	}
+	if in.reviewerUserID == "" {
+		in.reviewerUserID = env.reviewerUserID
+	}
+	if in.reviewerUserUPN == "" {
+		in.reviewerUserUPN = env.reviewerUserUPN
+	}
+	if in.autonomyCeiling == "" {
+		in.autonomyCeiling = env.autonomyCeiling
+	}
+	if in.maxUSDPerRun == 0 {
+		in.maxUSDPerRun = env.maxUSDPerRun
+	}
+	if in.poolSize == 0 {
+		in.poolSize = env.poolSize
+	}
+}
+
+// mergeEnvOverPrior overlays env on the reconstructed prior so a set MANDAT_*
+// var wins over the on-disk value (AC-13.10: env > existing config) and becomes
+// the interview's bracketed default, while every field env leaves unset keeps
+// its prior value — an unchanged re-run still round-trips byte-identical
+// (AC-13.11), since a set env var IS a change. With no prior (fresh install) it
+// returns an env-derived prior when any var is set so env seeds the defaults,
+// or nil when the environment is empty so the interview runs the fresh-install
+// discovery path.
+func mergeEnvOverPrior(prior *nonInteractiveInput, env nonInteractiveInput) *nonInteractiveInput {
+	var merged nonInteractiveInput
+	if prior != nil {
+		merged = *prior
+	}
+
+	envSet := false
+	overlay := func(dst *string, v string) {
+		if v != "" {
+			*dst = v
+			envSet = true
+		}
+	}
+	overlay(&merged.trackerOrg, env.trackerOrg)
+	overlay(&merged.trackerProject, env.trackerProject)
+	overlay(&merged.inProgressState, env.inProgressState)
+	overlay(&merged.authMode, env.authMode)
+	overlay(&merged.entraTenant, env.entraTenant)
+	overlay(&merged.entraBlueprint, env.entraBlueprint)
+	overlay(&merged.repoRaw, env.repoRaw)
+	overlay(&merged.repoKey, env.repoKey)
+	overlay(&merged.repoURL, env.repoURL)
+	overlay(&merged.baseBranch, env.baseBranch)
+	overlay(&merged.devIdentityID, env.devIdentityID)
+	overlay(&merged.devUserID, env.devUserID)
+	overlay(&merged.devUserUPN, env.devUserUPN)
+	overlay(&merged.reviewerIdentityID, env.reviewerIdentityID)
+	overlay(&merged.reviewerUserID, env.reviewerUserID)
+	overlay(&merged.reviewerUserUPN, env.reviewerUserUPN)
+	overlay(&merged.autonomyCeiling, env.autonomyCeiling)
+	if len(env.remitPaths) > 0 {
+		merged.remitPaths = env.remitPaths
+		envSet = true
+	}
+	if len(env.gates) > 0 {
+		merged.gates = env.gates
+		envSet = true
+	}
+	if env.maxUSDPerRun > 0 {
+		merged.maxUSDPerRun = env.maxUSDPerRun
+		envSet = true
+	}
+	if env.poolSize > 0 {
+		merged.poolSize = env.poolSize
+		envSet = true
+	}
+
+	if prior == nil && !envSet {
+		return nil
+	}
+	return &merged
 }
 
 // runInteractiveInterview drives the AC-13.3(c) prompt loop, collecting

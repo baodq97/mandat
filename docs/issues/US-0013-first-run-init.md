@@ -167,7 +167,7 @@ config-writing and token-minting stay separate commands, mirroring the `aws conf
       so it never hangs in CI. `--non-interactive`, and the non-TTY autodetect path,
       additionally imply `--yes` for the AC-13.12 write confirmation: no prompt of any kind,
       including the pre-write diff confirmation, fires on either path.
-- [ ] AC-13.10 Given `MANDAT_*` environment variables set for any init input, observe
+- [x] AC-13.10 Given `MANDAT_*` environment variables set for any init input, observe
       `init` accepts them with precedence flags > env > existing config values, and observe
       env inputs carry non-secret values only. Env vars feed the interview only: the
       written `config.yaml` remains the sole runtime source, and `mandat serve` never reads
