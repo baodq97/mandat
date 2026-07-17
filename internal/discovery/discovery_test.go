@@ -371,3 +371,47 @@ func TestValidateOrgAccess_TransportFailure_ConnectionRefused(t *testing.T) {
 		t.Fatalf("ValidateOrgAccess() error = %v, want a connection-level failure, not an *APIError", err)
 	}
 }
+
+func TestDiscover_MapsDefaultBranch_StripsRefsHeadsPrefix(t *testing.T) {
+	t.Parallel()
+
+	fake := &fakeADO{
+		profileBody:  `{"id":"11111111-0000-4000-8000-000000000001"}`,
+		accountsBody: `{"count":1,"value":[{"accountId":"22222222-0000-4000-8000-000000000002","accountName":"contoso"}]}`,
+		projectsBody: `{"count":1,"value":[{"id":"33333333-0000-4000-8000-000000000003","name":"mandat-pilot"}]}`,
+		reposBody:    `{"count":1,"value":[{"id":"44444444-0000-4000-8000-000000000004","name":"mandat","remoteUrl":"https://dev.azure.com/contoso/mandat-pilot/_git/mandat","defaultBranch":"refs/heads/main"}]}`,
+	}
+	srv := fake.start(t)
+	c := newClient(t, srv)
+
+	got, err := c.Discover(context.Background(), testToken)
+	if err != nil {
+		t.Fatalf("Discover() error = %v, want nil", err)
+	}
+	repos := got.Org.Projects[0].Repositories
+	if len(repos) != 1 || repos[0].DefaultBranch != "main" {
+		t.Errorf("Repositories[0].DefaultBranch = %q, want %q (refs/heads/ stripped)", repos[0].DefaultBranch, "main")
+	}
+}
+
+func TestDiscover_NullDefaultBranch_LeavesEmpty(t *testing.T) {
+	t.Parallel()
+
+	fake := &fakeADO{
+		profileBody:  `{"id":"11111111-0000-4000-8000-000000000001"}`,
+		accountsBody: `{"count":1,"value":[{"accountId":"22222222-0000-4000-8000-000000000002","accountName":"contoso"}]}`,
+		projectsBody: `{"count":1,"value":[{"id":"33333333-0000-4000-8000-000000000003","name":"mandat-pilot"}]}`,
+		reposBody:    `{"count":1,"value":[{"id":"44444444-0000-4000-8000-000000000004","name":"mandat","remoteUrl":"https://dev.azure.com/contoso/mandat-pilot/_git/mandat","defaultBranch":null}]}`,
+	}
+	srv := fake.start(t)
+	c := newClient(t, srv)
+
+	got, err := c.Discover(context.Background(), testToken)
+	if err != nil {
+		t.Fatalf("Discover() error = %v, want nil", err)
+	}
+	repos := got.Org.Projects[0].Repositories
+	if len(repos) != 1 || repos[0].DefaultBranch != "" {
+		t.Errorf("Repositories[0].DefaultBranch = %q, want empty for a null defaultBranch", repos[0].DefaultBranch)
+	}
+}

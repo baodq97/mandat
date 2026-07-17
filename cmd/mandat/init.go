@@ -21,6 +21,7 @@ import (
 
 	"github.com/baodq97/mandat/internal/config"
 	"github.com/baodq97/mandat/internal/discovery"
+	"github.com/baodq97/mandat/internal/entra"
 	"github.com/baodq97/mandat/internal/journal"
 )
 
@@ -157,7 +158,12 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		// disk an env-derived prior still seeds the interview, otherwise prior
 		// stays nil and the fresh-install discovery path runs.
 		prior = mergeEnvOverPrior(prior, envInput())
-		interviewed, err := runInteractiveInterview(context.Background(), reader, stdout, azCLITokenSource, productionDiscoverer, prior)
+		// Derive the machine-known defaults BEFORE the interview mints any
+		// discovery token (US-0015 AC-15.2): the az-session tenant that pins that
+		// token and the per-role Entra identities the interview offers as
+		// confirmed bracketed defaults.
+		prefill := resolvePrefill(context.Background(), prior)
+		interviewed, err := runInteractiveInterview(context.Background(), reader, stdout, azCLITokenSource, productionDiscoverer, prior, prefill)
 		if err != nil {
 			fmt.Fprintf(stderr, "mandat init: %v\n", err)
 			return 1
@@ -168,8 +174,11 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		// AC-13.1's refuse gate: an az-derived token that cannot reach the chosen
 		// org fails here, before any byte lands on disk (the non-interactive path
-		// takes no az token, so it is deliberately not gated).
-		if !validateADOBeforeWrite(context.Background(), azCLITokenSource, productionOrgValidator, interviewed.trackerOrg, stderr) {
+		// takes no az token, so it is deliberately not gated). The token is pinned
+		// to the interviewed entra.tenant, never az's ambient default (US-0015
+		// AC-15.1); entra.tenant is a required field, so it is always resolved by
+		// the time this runs (AC-15.5).
+		if !validateADOBeforeWrite(context.Background(), azCLITokenSource, productionOrgValidator, interviewed.entraTenant, interviewed.trackerOrg, stderr) {
 			return 1
 		}
 		// A TTY operator still confirms the diff unless they passed --yes.
@@ -908,18 +917,27 @@ func validateNonNegativeInt(v string) error {
 // discovery.Client makes (see internal/discovery).
 const adoResourceID = "499b84ac-1321-427f-aa17-267ca6975798"
 
-// tokenSource obtains a bearer token for the ADO resource. It is a func
-// field, not a hardcoded az invocation, so a test supplies a fake token with
-// no az call (US-0013 AC-13.1).
-type tokenSource func(ctx context.Context) (string, error)
+// tokenSource obtains a bearer token for the ADO resource, scoped to tenant so
+// the mint is pinned to the operator's configured Entra tenant rather than az's
+// ambient default (US-0015 AC-15.1). It is a func field, not a hardcoded az
+// invocation, so a test supplies a fake token with no az call (US-0013 AC-13.1).
+type tokenSource func(ctx context.Context, tenant string) (string, error)
 
 // azCLITokenSource is the production tokenSource: it shells out to the az
 // CLI. When az is missing or the operator isn't logged in, the command fails
 // fast (it never prompts or blocks waiting for an interactive login), so the
 // caller's fallback to manual entry runs immediately, not after a hang.
-func azCLITokenSource(ctx context.Context) (string, error) {
-	out, err := exec.CommandContext(ctx, "az", "account", "get-access-token",
-		"--resource", adoResourceID, "--query", "accessToken", "-o", "tsv").Output()
+func azCLITokenSource(ctx context.Context, tenant string) (string, error) {
+	args := []string{"account", "get-access-token", "--resource", adoResourceID}
+	// --tenant pins the mint to the operator's configured tenant, never az's
+	// ambient default (US-0015 AC-15.1). An empty tenant omits the flag rather
+	// than passing --tenant ""; the caller never mints an unpinned discovery
+	// token — it skips discovery when no tenant resolves (AC-15.5).
+	if tenant != "" {
+		args = append(args, "--tenant", tenant)
+	}
+	args = append(args, "--query", "accessToken", "-o", "tsv")
+	out, err := exec.CommandContext(ctx, "az", args...).Output()
 	if err != nil {
 		return "", fmt.Errorf("az account get-access-token: %w", err)
 	}
@@ -928,6 +946,27 @@ func azCLITokenSource(ctx context.Context) (string, error) {
 		return "", errors.New("az account get-access-token returned no token")
 	}
 	return token, nil
+}
+
+// deriveTenant reads the Entra tenant id of the operator's active az session, so
+// init pins the discovery token to it (US-0015) and offers it as the
+// entra.tenant prompt default without the operator retyping a GUID. A var seam,
+// not a hardcoded az call, so a test supplies a tenant with no az invocation
+// (mirrors the tokenSource seam). It mirrors azCLITokenSource's fail-fast exec:
+// a missing or logged-out az returns an error the caller treats as "nothing to
+// prefill", never a hang.
+var deriveTenant = productionDeriveTenant
+
+func productionDeriveTenant(ctx context.Context) (string, error) {
+	out, err := exec.CommandContext(ctx, "az", "account", "show", "--query", "tenantId", "-o", "tsv").Output()
+	if err != nil {
+		return "", fmt.Errorf("az account show: %w", err)
+	}
+	tenant := strings.TrimSpace(string(out))
+	if tenant == "" {
+		return "", errors.New("az account show returned no tenantId")
+	}
+	return tenant, nil
 }
 
 // discoverer runs the discovery chain for token. It is a func field so a
@@ -943,6 +982,23 @@ func productionDiscoverer(ctx context.Context, token string) (discovery.Result, 
 		return discovery.Result{}, err
 	}
 	return c.Discover(ctx, token)
+}
+
+// discoverEntra reads the Entra Agent-ID registry (blueprint, identities, paired
+// users) so init prefills each role's identity fields from what the tenant
+// already has, instead of the operator pasting six GUIDs. A var seam so a test
+// supplies a fake registry with no az/Graph call; production mints a Graph token
+// through the same az session ADO discovery uses. An unreachable registry is
+// best-effort prefill, never fatal — the caller falls back to prompting rather
+// than hard-failing init because Entra is unreachable.
+var discoverEntra = productionDiscoverEntra
+
+func productionDiscoverEntra(ctx context.Context) (entra.Registry, error) {
+	c, err := entra.New(entra.Config{TokenSource: entra.AzureCLIGraphTokenSource})
+	if err != nil {
+		return entra.Registry{}, err
+	}
+	return c.DiscoverRegistry(ctx)
 }
 
 // orgValidator probes whether token can reach org on a real Azure DevOps
@@ -973,8 +1029,12 @@ func productionOrgValidator(ctx context.Context, token, org string) error {
 //   - a token that fails the probe: the token cannot reach org, so it refuses;
 //     config.yaml is not written and the caller returns non-zero.
 //   - a token that reaches org: proceed.
-func validateADOBeforeWrite(ctx context.Context, getToken tokenSource, validate orgValidator, org string, out io.Writer) bool {
-	token, err := getToken(ctx)
+//
+// The token is minted pinned to tenant (US-0015 AC-15.1), the entra.tenant the
+// interview resolved, so the probe runs against the operator's configured
+// tenant rather than az's ambient default.
+func validateADOBeforeWrite(ctx context.Context, getToken tokenSource, validate orgValidator, tenant, org string, out io.Writer) bool {
+	token, err := getToken(ctx, tenant)
 	if err != nil {
 		fmt.Fprintf(out, "note: could not validate Azure DevOps access (%v); writing config.yaml unvalidated\n", err)
 		return true
@@ -986,15 +1046,16 @@ func validateADOBeforeWrite(ctx context.Context, getToken tokenSource, validate 
 	return true
 }
 
-// attemptDiscovery gets a token via getToken and, on success, runs discover
-// for it. Any failure — the token source itself, or a typed discovery error
+// attemptDiscovery gets a token via getToken, pinned to tenant (US-0015
+// AC-15.1), and, on success, runs discover for it. Any failure — the token
+// source itself, or a typed discovery error
 // (ErrNoOrgReachable, AmbiguousOrgError, APIError, or a transport error) —
 // prints one diagnostic line to iv.w and reports ok=false; discovery is
 // best-effort prefill, never a hard requirement, so this never returns an
 // error itself, and the caller always has a path forward (prompt from
 // scratch through the same helpers the no-discovery path uses).
-func attemptDiscovery(ctx context.Context, iv *interviewer, getToken tokenSource, discover discoverer) (result discovery.Result, ok bool) {
-	token, err := getToken(ctx)
+func attemptDiscovery(ctx context.Context, iv *interviewer, getToken tokenSource, discover discoverer, tenant string) (result discovery.Result, ok bool) {
+	token, err := getToken(ctx, tenant)
 	if err != nil {
 		fmt.Fprintf(iv.w, "note: could not obtain an Azure DevOps token (%v); falling back to manual entry\n", err)
 		return discovery.Result{}, false
@@ -1052,6 +1113,22 @@ func repoURLsForProject(org discovery.Org, project string) []string {
 		return urls
 	}
 	return nil
+}
+
+// defaultBranchForRepoURL returns the discovered default branch of the repo in
+// org whose remote clone url is repoURL, or "" when no discovered repo matches
+// (a manually entered url) or the match reported a null defaultBranch (an empty
+// repo), so the base_branch prompt falls back to plain entry (auto-derive
+// fallback).
+func defaultBranchForRepoURL(org discovery.Org, repoURL string) string {
+	for _, p := range org.Projects {
+		for _, r := range p.Repositories {
+			if r.RemoteURL == repoURL {
+				return r.DefaultBranch
+			}
+		}
+	}
+	return ""
 }
 
 // reconstructPriorInput reads an existing config.yaml back into the interview's
@@ -1309,6 +1386,76 @@ func mergeEnvOverPrior(prior *nonInteractiveInput, env nonInteractiveInput) *non
 	return &merged
 }
 
+// discoveredPrefill carries the machine-derived defaults a fresh-install
+// interview offers as bracketed prompt values so the operator confirms instead
+// of typing them: the az-session Entra tenant (also the pin for the discovery
+// token, US-0015) and, per role, the agent identity/user read from the Entra
+// registry. Any field left empty — no az session, an unreachable registry, or
+// no registry match for a role — falls back to plain prompting for that field.
+type discoveredPrefill struct {
+	tenant         string
+	roleIdentities map[string]roleIdentityPrefill
+}
+
+// roleIdentityPrefill is one role's Entra identity read from the registry.
+// identityID may be set with userID/userName empty when the matched identity
+// has no paired agent user yet — the interview then prefills the identity and
+// prompts for the user fields.
+type roleIdentityPrefill struct {
+	identityID string
+	userID     string
+	userName   string
+}
+
+// resolvePrefill gathers the machine-known defaults for a fresh-install
+// interview: the tenant that pins the discovery token (resolved BEFORE any mint,
+// US-0015 AC-15.2) and the per-role Entra identities. Every derivation is
+// best-effort — a field it cannot fill stays empty so the interview prompts for
+// it (US-0015 AC-15.5; auto-derive fallback). A re-run (or any env/disk-seeded
+// prior) is driven by the stored config, not a fresh machine probe: the
+// interview reads its defaults from prior and ignores this prefill, so it
+// derives nothing (and issues no az/Graph call).
+func resolvePrefill(ctx context.Context, prior *nonInteractiveInput) discoveredPrefill {
+	if prior != nil {
+		return discoveredPrefill{}
+	}
+	var pf discoveredPrefill
+	if tenant, err := deriveTenant(ctx); err == nil {
+		pf.tenant = tenant
+	}
+	if reg, err := discoverEntra(ctx); err == nil {
+		pf.roleIdentities = roleIdentitiesFromRegistry(reg, "dev", "reviewer")
+	}
+	return pf
+}
+
+// roleIdentitiesFromRegistry picks, for each role, the agent identity whose
+// DisplayName contains the role name (case-insensitive — the same displayName
+// convention provision.go's reuse report matches on) and pairs it to its agent
+// user. A role with no matching identity is omitted so the interview prompts for
+// it; a matched identity with no paired user keeps its user fields empty, so the
+// interview prefills the identity and prompts for the user (auto-derive
+// fallback). The first identity whose name contains the role wins.
+func roleIdentitiesFromRegistry(reg entra.Registry, roles ...string) map[string]roleIdentityPrefill {
+	out := make(map[string]roleIdentityPrefill)
+	for _, role := range roles {
+		needle := strings.ToLower(role)
+		for _, id := range reg.Identities {
+			if !strings.Contains(strings.ToLower(id.DisplayName), needle) {
+				continue
+			}
+			ri := roleIdentityPrefill{identityID: id.ID}
+			if user, ok := reg.PairedUser(id); ok {
+				ri.userID = user.ID
+				ri.userName = user.UserPrincipalName
+			}
+			out[role] = ri
+			break
+		}
+	}
+	return out
+}
+
 // runInteractiveInterview drives the AC-13.3(c) prompt loop, collecting
 // every irreducible field plus the two applyDefaults fields
 // (tracker.states.in_progress, runner.pool_size) whose prompts show their
@@ -1318,32 +1465,52 @@ func mergeEnvOverPrior(prior *nonInteractiveInput, env nonInteractiveInput) *non
 // the --non-interactive path uses.
 //
 // prior is nil for a fresh install and the reconstructed existing config for a
-// re-run (AC-13.11). On a fresh install it gets a token from getToken and, on
-// success, runs discover for it (US-0013 AC-13.1): a successful discovery
-// prefills tracker.org, tracker.project, and repo url as confirm-or-override
-// defaults, and any failure falls back to prompting those fields from scratch.
+// re-run (AC-13.11). On a fresh install it seeds each prompt's default from
+// prefill (the caller-resolved az-session tenant and per-role Entra identities)
+// and, when prefill carries a tenant, mints a tenant-pinned token via getToken
+// (US-0015 AC-15.1/AC-15.2) and runs discover for it (US-0013 AC-13.1): a
+// successful discovery prefills tracker.org, tracker.project, repo url, and the
+// selected repo's base_branch as confirm-or-override defaults, and any failure
+// (including no resolved tenant, which skips the mint entirely, AC-15.5) falls
+// back to prompting those fields from scratch.
 // On a re-run the existing config — not a fresh probe — is the source of truth,
 // so discovery is skipped and every prompt instead offers its prior value as
 // the bracketed default; an unchanged field (a blank Enter through all) comes
 // out byte-identical to the file that seeded prior.
-func runInteractiveInterview(ctx context.Context, reader *bufio.Reader, out io.Writer, getToken tokenSource, discover discoverer, prior *nonInteractiveInput) (nonInteractiveInput, error) {
+func runInteractiveInterview(ctx context.Context, reader *bufio.Reader, out io.Writer, getToken tokenSource, discover discoverer, prior *nonInteractiveInput, prefill discoveredPrefill) (nonInteractiveInput, error) {
 	iv := &interviewer{r: reader, w: out}
 	var in nonInteractiveInput
 	var err error
 
-	// p supplies each field's prior value as its prompt default on a re-run and
-	// the zero value (an empty string — "keep the built-in default") on a fresh
-	// install, so requiredWithDefault degrades to required for a field with no
-	// prior to offer (AC-13.11).
+	// p supplies each field's prompt default: the prior value on a re-run, and on
+	// a fresh install the machine-derived prefill (the az-session tenant and the
+	// per-role Entra identities) so the operator confirms bracketed defaults
+	// instead of typing GUIDs. A field neither source fills stays "" and
+	// requiredWithDefault degrades to a plain required prompt (AC-13.11;
+	// auto-derive fallback).
 	var p nonInteractiveInput
 	if prior != nil {
 		p = *prior
+	} else {
+		p.entraTenant = prefill.tenant
+		dev := prefill.roleIdentities["dev"]
+		p.devIdentityID, p.devUserID, p.devUserUPN = dev.identityID, dev.userID, dev.userName
+		reviewer := prefill.roleIdentities["reviewer"]
+		p.reviewerIdentityID, p.reviewerUserID, p.reviewerUserUPN = reviewer.identityID, reviewer.userID, reviewer.userName
 	}
 
 	var result discovery.Result
 	var discovered bool
 	if prior == nil {
-		result, discovered = attemptDiscovery(ctx, iv, getToken, discover)
+		// The discovery token is scoped to the resolved tenant (US-0015
+		// AC-15.2); with none resolved (no flag/env, no az session) init skips
+		// discovery rather than minting an unpinned token, and prompts every
+		// field manually (AC-15.5).
+		if prefill.tenant != "" {
+			result, discovered = attemptDiscovery(ctx, iv, getToken, discover, prefill.tenant)
+		} else {
+			fmt.Fprintln(iv.w, "note: no Entra tenant resolved (no flag/env value and no active az session); skipping Azure DevOps discovery to avoid an unpinned token")
+		}
 	}
 
 	if prior != nil {
@@ -1416,7 +1583,14 @@ func runInteractiveInterview(ctx context.Context, reader *bufio.Reader, out io.W
 		}
 	}
 	in.repoRaw = in.repoKey + "=" + in.repoURL
-	if in.baseBranch, err = iv.requiredWithDefault("repo base_branch", p.baseBranch, nil); err != nil {
+	// A fresh discovery prefills base_branch from the selected repo's default
+	// branch (discovery strips the refs/heads/ prefix); an empty repo reports a
+	// null default branch, leaving this "" so the prompt falls back to required.
+	baseBranchDef := p.baseBranch
+	if discovered && baseBranchDef == "" {
+		baseBranchDef = defaultBranchForRepoURL(result.Org, in.repoURL)
+	}
+	if in.baseBranch, err = iv.requiredWithDefault("repo base_branch", baseBranchDef, nil); err != nil {
 		return in, err
 	}
 	if in.remitPaths, err = iv.repeatedWithDefault("repo remit path", p.remitPaths); err != nil {

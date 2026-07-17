@@ -15,6 +15,7 @@ import (
 
 	"github.com/baodq97/mandat/internal/config"
 	"github.com/baodq97/mandat/internal/discovery"
+	"github.com/baodq97/mandat/internal/entra"
 )
 
 // validInitArgs returns a full, valid --non-interactive flag set: every
@@ -592,9 +593,18 @@ func newInteractiveScript(lines []string) *bufio.Reader {
 // failingTokenSource simulates az missing or the operator not being logged
 // in, so every test exercising the manual-entry interview flow does so
 // deterministically, with no real az invocation and no dependence on the
-// test host's environment (US-0013 AC-13.1).
-func failingTokenSource(context.Context) (string, error) {
+// test host's environment (US-0013 AC-13.1). The tenant argument (US-0015) is
+// ignored: a failing source never reaches the mint.
+func failingTokenSource(context.Context, string) (string, error) {
 	return "", errors.New("az: command not found")
+}
+
+// discoveryTenantPrefill is the fresh-install prefill the interview tests that
+// exercise discovery pass: a resolved tenant so the tenant-pinned discovery
+// token is minted (US-0015), with the role identities left empty so those
+// fields still prompt from the script exactly as before.
+func discoveryTenantPrefill() discoveredPrefill {
+	return discoveredPrefill{tenant: "11111111-1111-1111-1111-111111111111"}
 }
 
 // unreachableDiscoverer fails a test if the interview ever calls discover
@@ -612,7 +622,7 @@ func TestRunInteractiveInterview_HappyPath_EmitAndReload(t *testing.T) {
 	t.Parallel()
 
 	var transcript strings.Builder
-	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(validInteractiveScriptLines()), &transcript, failingTokenSource, unreachableDiscoverer(t), nil)
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(validInteractiveScriptLines()), &transcript, failingTokenSource, unreachableDiscoverer(t), nil, discoveryTenantPrefill())
 	if err != nil {
 		t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
 	}
@@ -694,7 +704,7 @@ func TestRunInteractiveInterview_EmptyRequiredField_RePrompts(t *testing.T) {
 	lines := append([]string{""}, validInteractiveScriptLines()...) // blank answer to the first prompt, tracker.org
 
 	var transcript strings.Builder
-	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(lines), &transcript, failingTokenSource, unreachableDiscoverer(t), nil)
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(lines), &transcript, failingTokenSource, unreachableDiscoverer(t), nil, discoveryTenantPrefill())
 	if err != nil {
 		t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
 	}
@@ -714,7 +724,7 @@ func TestRunInteractiveInterview_EnterKeepsDefault(t *testing.T) {
 	t.Parallel()
 
 	var transcript strings.Builder
-	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(validInteractiveScriptLines()), &transcript, failingTokenSource, unreachableDiscoverer(t), nil)
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(validInteractiveScriptLines()), &transcript, failingTokenSource, unreachableDiscoverer(t), nil, discoveryTenantPrefill())
 	if err != nil {
 		t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
 	}
@@ -758,7 +768,7 @@ func TestRunInteractiveInterview_OverridesDefaultedField(t *testing.T) {
 	lines[2] = "InProgress"
 	lines[22] = "3"
 
-	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(lines), new(strings.Builder), failingTokenSource, unreachableDiscoverer(t), nil)
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(lines), new(strings.Builder), failingTokenSource, unreachableDiscoverer(t), nil, discoveryTenantPrefill())
 	if err != nil {
 		t.Fatalf("runInteractiveInterview() error = %v", err)
 	}
@@ -883,7 +893,7 @@ func TestRunInteractiveInterview_Rerun_AllEnter_ByteIdentical(t *testing.T) {
 			reader := bufio.NewReader(strings.NewReader(strings.Repeat("\n", rerunPromptCount)))
 
 			var transcript strings.Builder
-			got, err := runInteractiveInterview(context.Background(), reader, &transcript, failingTokenSource, unreachableDiscoverer(t), &prior)
+			got, err := runInteractiveInterview(context.Background(), reader, &transcript, failingTokenSource, unreachableDiscoverer(t), &prior, discoveredPrefill{})
 			if err != nil {
 				t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
 			}
@@ -933,9 +943,11 @@ func discovererFor(t *testing.T, srv *httptest.Server) discoverer {
 	return c.Discover
 }
 
-// fakeADOTokenSource always returns token with no az invocation.
+// fakeADOTokenSource always returns token with no az invocation. It ignores the
+// tenant argument (US-0015): tests that assert the tenant pin use a capturing
+// source instead.
 func fakeADOTokenSource(token string) tokenSource {
-	return func(context.Context) (string, error) {
+	return func(context.Context, string) (string, error) {
 		return token, nil
 	}
 }
@@ -961,7 +973,7 @@ func TestRunInteractiveInterview_DiscoverySuccess_ConfirmProducesLoadableConfig(
 	lines[7] = "" // repo url: accept the discovered value
 
 	var transcript strings.Builder
-	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(lines), &transcript, fakeADOTokenSource(testFakeToken), discovererFor(t, srv), nil)
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(lines), &transcript, fakeADOTokenSource(testFakeToken), discovererFor(t, srv), nil, discoveryTenantPrefill())
 	if err != nil {
 		t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
 	}
@@ -1017,7 +1029,7 @@ func TestRunInteractiveInterview_AmbiguousOrg_FallsBackToPrompting(t *testing.T)
 	)
 
 	var transcript strings.Builder
-	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(validInteractiveScriptLines()), &transcript, fakeADOTokenSource(testFakeToken), discovererFor(t, srv), nil)
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(validInteractiveScriptLines()), &transcript, fakeADOTokenSource(testFakeToken), discovererFor(t, srv), nil, discoveryTenantPrefill())
 	if err != nil {
 		t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
 	}
@@ -1048,7 +1060,7 @@ func TestRunInteractiveInterview_TokenSourceFailure_FallsBackToPrompting(t *test
 	t.Parallel()
 
 	var transcript strings.Builder
-	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(validInteractiveScriptLines()), &transcript, failingTokenSource, unreachableDiscoverer(t), nil)
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(validInteractiveScriptLines()), &transcript, failingTokenSource, unreachableDiscoverer(t), nil, discoveryTenantPrefill())
 	if err != nil {
 		t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
 	}
@@ -1528,7 +1540,7 @@ func TestValidateADOBeforeWrite_TokenFailsValidation_Refuses(t *testing.T) {
 	}
 
 	var out strings.Builder
-	if validateADOBeforeWrite(context.Background(), fakeADOTokenSource(testFakeToken), failValidate, "contoso", &out) {
+	if validateADOBeforeWrite(context.Background(), fakeADOTokenSource(testFakeToken), failValidate, "11111111-1111-1111-1111-111111111111", "contoso", &out) {
 		t.Fatalf("validateADOBeforeWrite() = true, want false (a token that fails validation must refuse the write) (out: %s)", out.String())
 	}
 	if !strings.Contains(out.String(), "contoso") {
@@ -1547,7 +1559,7 @@ func TestValidateADOBeforeWrite_TokenReachesOrg_Proceeds(t *testing.T) {
 	okValidate := func(context.Context, string, string) error { return nil }
 
 	var out strings.Builder
-	if !validateADOBeforeWrite(context.Background(), fakeADOTokenSource(testFakeToken), okValidate, "contoso", &out) {
+	if !validateADOBeforeWrite(context.Background(), fakeADOTokenSource(testFakeToken), okValidate, "11111111-1111-1111-1111-111111111111", "contoso", &out) {
 		t.Fatalf("validateADOBeforeWrite() = false, want true (a reachable token proceeds) (out: %s)", out.String())
 	}
 }
@@ -1566,7 +1578,7 @@ func TestValidateADOBeforeWrite_NoToken_ProceedsUnvalidated(t *testing.T) {
 	}
 
 	var out strings.Builder
-	if !validateADOBeforeWrite(context.Background(), failingTokenSource, unreachableValidate, "contoso", &out) {
+	if !validateADOBeforeWrite(context.Background(), failingTokenSource, unreachableValidate, "11111111-1111-1111-1111-111111111111", "contoso", &out) {
 		t.Fatalf("validateADOBeforeWrite() = false, want true (no token still lets the operator configure) (out: %s)", out.String())
 	}
 	if !strings.Contains(out.String(), "unvalidated") {
@@ -1690,5 +1702,424 @@ func TestEnvInput_BadNumericSkipped(t *testing.T) {
 	}
 	if env.poolSize != 0 {
 		t.Errorf("poolSize = %d, want 0 (a bad int is skipped, not fatal)", env.poolSize)
+	}
+}
+
+// swapDeriveTenant installs fn as init's tenant-derivation seam for the test's
+// duration, restoring the production one on cleanup. A test that swaps it runs
+// non-parallel: deriveTenant is package state and -race rejects a concurrent
+// write.
+func swapDeriveTenant(t *testing.T, fn func(context.Context) (string, error)) {
+	t.Helper()
+	saved := deriveTenant
+	deriveTenant = fn
+	t.Cleanup(func() { deriveTenant = saved })
+}
+
+// swapDiscoverEntra installs fn as init's Entra-registry seam for the test's
+// duration, restoring the production one on cleanup. Non-parallel for the same
+// reason as swapDeriveTenant.
+func swapDiscoverEntra(t *testing.T, fn func(context.Context) (entra.Registry, error)) {
+	t.Helper()
+	saved := discoverEntra
+	discoverEntra = fn
+	t.Cleanup(func() { discoverEntra = saved })
+}
+
+// writeFakeAz writes a fake az onto a fresh dir prepended to PATH: it records
+// its argument list to argsFile and prints a token, so a test drives the real
+// production token source with no live az and inspects exactly what was invoked
+// (US-0015 AC-15.4). The caller runs non-parallel: it mutates PATH via t.Setenv.
+func writeFakeAz(t *testing.T) (argsFile string) {
+	t.Helper()
+	dir := t.TempDir()
+	argsFile = filepath.Join(dir, "args.txt")
+	script := "#!/bin/sh\nprintf '%s' \"$*\" > '" + argsFile + "'\nprintf 'fake-token\\n'\n"
+	if err := os.WriteFile(filepath.Join(dir, "az"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake az: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return argsFile
+}
+
+// TestAzCLITokenSource_PinsTenantFlag is US-0015 AC-15.4's contract test: with a
+// fake az on PATH, the production token source's argument list carries --tenant
+// <configured value>. Dropping --tenant from azCLITokenSource reproduces a
+// failing test, not a silent pass. Not parallel: mutates PATH.
+func TestAzCLITokenSource_PinsTenantFlag(t *testing.T) {
+	argsFile := writeFakeAz(t)
+
+	token, err := azCLITokenSource(context.Background(), "my-tenant-id")
+	if err != nil {
+		t.Fatalf("azCLITokenSource() error = %v, want nil", err)
+	}
+	if token != "fake-token" {
+		t.Errorf("token = %q, want the fake az output", token)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read captured args: %v", err)
+	}
+	if !strings.Contains(string(args), "--tenant my-tenant-id") {
+		t.Errorf("az args = %q, want them to carry --tenant my-tenant-id (US-0015 AC-15.4)", string(args))
+	}
+	if !strings.Contains(string(args), "--resource "+adoResourceID) {
+		t.Errorf("az args = %q, want the pinned ADO --resource still present", string(args))
+	}
+}
+
+// TestAzCLITokenSource_EmptyTenant_OmitsFlag proves the guard: with no tenant,
+// azCLITokenSource omits --tenant rather than passing --tenant "" (the interview
+// never calls it without a tenant — it skips discovery instead, AC-15.5). Not
+// parallel: mutates PATH.
+func TestAzCLITokenSource_EmptyTenant_OmitsFlag(t *testing.T) {
+	argsFile := writeFakeAz(t)
+
+	if _, err := azCLITokenSource(context.Background(), ""); err != nil {
+		t.Fatalf("azCLITokenSource() error = %v, want nil", err)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read captured args: %v", err)
+	}
+	if strings.Contains(string(args), "--tenant") {
+		t.Errorf("az args = %q, want no --tenant flag for an empty tenant", string(args))
+	}
+}
+
+// TestRoleIdentitiesFromRegistry_MatchesAndPairs proves the identity prefill's
+// core: each role picks the agent identity whose displayName carries the role
+// name (case-insensitive) and pairs it to its agent user, so the interview
+// offers the six fields as confirmed defaults.
+func TestRoleIdentitiesFromRegistry_MatchesAndPairs(t *testing.T) {
+	t.Parallel()
+
+	reg := entra.Registry{
+		Identities: []entra.AgentIdentity{
+			{ID: "id-dev", DisplayName: "mandat-DEV-agent"},
+			{ID: "id-rev", DisplayName: "mandat reviewer agent"},
+			{ID: "id-other", DisplayName: "unrelated-principal"},
+		},
+		Users: []entra.AgentUser{
+			{ID: "u-dev", UserPrincipalName: "dev@contoso.onmicrosoft.com", IdentityParentID: "id-dev"},
+			{ID: "u-rev", UserPrincipalName: "rev@contoso.onmicrosoft.com", IdentityParentID: "id-rev"},
+		},
+	}
+
+	got := roleIdentitiesFromRegistry(reg, "dev", "reviewer")
+	dev := got["dev"]
+	if dev.identityID != "id-dev" || dev.userID != "u-dev" || dev.userName != "dev@contoso.onmicrosoft.com" {
+		t.Errorf("dev prefill = %+v, want id-dev paired to u-dev/dev@...", dev)
+	}
+	rev := got["reviewer"]
+	if rev.identityID != "id-rev" || rev.userID != "u-rev" || rev.userName != "rev@contoso.onmicrosoft.com" {
+		t.Errorf("reviewer prefill = %+v, want id-rev paired to u-rev/rev@...", rev)
+	}
+}
+
+// TestRoleIdentitiesFromRegistry_NoMatchOmitsRole proves the fallback: a role
+// with no matching identity is omitted from the map, so the interview prompts
+// for it rather than prefilling a wrong identity.
+func TestRoleIdentitiesFromRegistry_NoMatchOmitsRole(t *testing.T) {
+	t.Parallel()
+
+	reg := entra.Registry{
+		Identities: []entra.AgentIdentity{{ID: "id-dev", DisplayName: "mandat dev agent"}},
+		Users:      []entra.AgentUser{{ID: "u-dev", UserPrincipalName: "dev@contoso", IdentityParentID: "id-dev"}},
+	}
+
+	got := roleIdentitiesFromRegistry(reg, "dev", "reviewer")
+	if _, ok := got["reviewer"]; ok {
+		t.Error("reviewer prefilled despite no matching identity, want it omitted (prompt fallback)")
+	}
+	if _, ok := got["dev"]; !ok {
+		t.Error("dev omitted despite a matching identity, want it prefilled")
+	}
+}
+
+// TestRoleIdentitiesFromRegistry_MatchWithoutPairedUser proves the partial-fill
+// case: a matched identity with no paired user prefills the identity id but
+// leaves the user fields empty, so the interview prefills one and prompts for
+// the others.
+func TestRoleIdentitiesFromRegistry_MatchWithoutPairedUser(t *testing.T) {
+	t.Parallel()
+
+	reg := entra.Registry{Identities: []entra.AgentIdentity{{ID: "id-dev", DisplayName: "dev"}}}
+	dev := roleIdentitiesFromRegistry(reg, "dev")["dev"]
+	if dev.identityID != "id-dev" {
+		t.Errorf("dev.identityID = %q, want id-dev (prefilled even with no paired user)", dev.identityID)
+	}
+	if dev.userID != "" || dev.userName != "" {
+		t.Errorf("dev user fields = %q/%q, want empty (no paired user → prompt for them)", dev.userID, dev.userName)
+	}
+}
+
+// TestResolvePrefill_FreshInstall_DerivesTenantAndReadsRegistry proves the
+// resolve step init runs before the interview: on a fresh install it derives the
+// tenant and reads the registry through the injectable seams. Not parallel: it
+// swaps package-var seams.
+func TestResolvePrefill_FreshInstall_DerivesTenantAndReadsRegistry(t *testing.T) {
+	swapDeriveTenant(t, func(context.Context) (string, error) { return "derived-tenant", nil })
+	swapDiscoverEntra(t, func(context.Context) (entra.Registry, error) {
+		return entra.Registry{
+			Identities: []entra.AgentIdentity{{ID: "id-dev", DisplayName: "dev-agent"}},
+			Users:      []entra.AgentUser{{ID: "u-dev", UserPrincipalName: "dev@contoso", IdentityParentID: "id-dev"}},
+		}, nil
+	})
+
+	pf := resolvePrefill(context.Background(), nil)
+	if pf.tenant != "derived-tenant" {
+		t.Errorf("prefill.tenant = %q, want the derived tenant", pf.tenant)
+	}
+	if pf.roleIdentities["dev"].identityID != "id-dev" {
+		t.Errorf("prefill dev identity = %+v, want id-dev from the registry", pf.roleIdentities["dev"])
+	}
+}
+
+// TestResolvePrefill_SeamsFail_LeaveEmpty proves the never-fatal contract: a
+// failed tenant derivation or an unreachable registry leaves the prefill empty
+// (US-0015 AC-15.5; auto-derive fallback), so the interview prompts every field.
+// Not parallel: swaps package-var seams.
+func TestResolvePrefill_SeamsFail_LeaveEmpty(t *testing.T) {
+	swapDeriveTenant(t, func(context.Context) (string, error) { return "", errors.New("az missing") })
+	swapDiscoverEntra(t, func(context.Context) (entra.Registry, error) {
+		return entra.Registry{}, errors.New("graph unreachable")
+	})
+
+	pf := resolvePrefill(context.Background(), nil)
+	if pf.tenant != "" {
+		t.Errorf("prefill.tenant = %q, want empty when derivation fails", pf.tenant)
+	}
+	if len(pf.roleIdentities) != 0 {
+		t.Errorf("prefill.roleIdentities = %+v, want empty when the registry is unreachable", pf.roleIdentities)
+	}
+}
+
+// TestResolvePrefill_Rerun_SkipsDerivation proves a re-run (any non-nil prior)
+// consults neither seam: the stored config, not a fresh probe, is the source of
+// truth. Not parallel: swaps package-var seams.
+func TestResolvePrefill_Rerun_SkipsDerivation(t *testing.T) {
+	swapDeriveTenant(t, func(context.Context) (string, error) {
+		t.Fatal("deriveTenant called on a re-run, want the stored config used")
+		return "", nil
+	})
+	swapDiscoverEntra(t, func(context.Context) (entra.Registry, error) {
+		t.Fatal("discoverEntra called on a re-run, want the stored config used")
+		return entra.Registry{}, nil
+	})
+
+	prior := validNonInteractiveInput()
+	pf := resolvePrefill(context.Background(), &prior)
+	if pf.tenant != "" || len(pf.roleIdentities) != 0 {
+		t.Errorf("re-run prefill = %+v, want empty (interview reads the stored config)", pf)
+	}
+}
+
+// TestRunInteractiveInterview_PrefillsTenantAndRoleIdentities proves the visible
+// win: a fresh install seeded with a discovered prefill offers the tenant and
+// the six role-identity fields as bracketed defaults, so a blank Enter through
+// them confirms the derived values instead of retyping GUIDs.
+func TestRunInteractiveInterview_PrefillsTenantAndRoleIdentities(t *testing.T) {
+	t.Parallel()
+
+	prefill := discoveredPrefill{
+		tenant: "derived-tenant-guid",
+		roleIdentities: map[string]roleIdentityPrefill{
+			"dev":      {identityID: "reg-dev-id", userID: "reg-dev-user", userName: "reg-dev@contoso.onmicrosoft.com"},
+			"reviewer": {identityID: "reg-rev-id", userID: "reg-rev-user", userName: "reg-rev@contoso.onmicrosoft.com"},
+		},
+	}
+
+	lines := validInteractiveScriptLines()
+	lines[4] = "" // entra.tenant: accept the derived default
+	for i := 15; i <= 20; i++ {
+		lines[i] = "" // accept each prefilled role-identity default
+	}
+
+	var transcript strings.Builder
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(lines), &transcript, failingTokenSource, unreachableDiscoverer(t), nil, prefill)
+	if err != nil {
+		t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
+	}
+	if in.entraTenant != "derived-tenant-guid" {
+		t.Errorf("entraTenant = %q, want the derived default kept by a blank Enter", in.entraTenant)
+	}
+	if in.devIdentityID != "reg-dev-id" || in.devUserID != "reg-dev-user" || in.devUserUPN != "reg-dev@contoso.onmicrosoft.com" {
+		t.Errorf("dev identity = %q/%q/%q, want the prefilled registry values", in.devIdentityID, in.devUserID, in.devUserUPN)
+	}
+	if in.reviewerIdentityID != "reg-rev-id" || in.reviewerUserID != "reg-rev-user" || in.reviewerUserUPN != "reg-rev@contoso.onmicrosoft.com" {
+		t.Errorf("reviewer identity = %q/%q/%q, want the prefilled registry values", in.reviewerIdentityID, in.reviewerUserID, in.reviewerUserUPN)
+	}
+	if !strings.Contains(transcript.String(), "[derived-tenant-guid]") {
+		t.Errorf("transcript = %q, want the entra.tenant prompt to show the derived tenant in brackets", transcript.String())
+	}
+	if !strings.Contains(transcript.String(), "[reg-dev-id]") {
+		t.Errorf("transcript = %q, want the dev identity prompt to show the prefilled id in brackets", transcript.String())
+	}
+}
+
+// TestRunInteractiveInterview_MissingRoleInRegistry_PromptsForIt proves the
+// per-role fallback: with only dev in the registry, dev is prefilled and
+// confirmed by a blank Enter while reviewer has no default and is typed from the
+// script, exactly as a no-discovery run would prompt it.
+func TestRunInteractiveInterview_MissingRoleInRegistry_PromptsForIt(t *testing.T) {
+	t.Parallel()
+
+	prefill := discoveredPrefill{
+		tenant: "derived-tenant-guid",
+		roleIdentities: map[string]roleIdentityPrefill{
+			"dev": {identityID: "reg-dev-id", userID: "reg-dev-user", userName: "reg-dev@contoso.onmicrosoft.com"},
+		},
+	}
+
+	lines := validInteractiveScriptLines()
+	lines[15] = "" // roles.dev.agent_identity_id: accept the prefilled default
+	lines[16] = "" // roles.dev.agent_user_id
+	lines[17] = "" // roles.dev.agent_user_name
+	// 18–20 (reviewer) keep their script values: no prefill, so those prompt.
+
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(lines), new(strings.Builder), failingTokenSource, unreachableDiscoverer(t), nil, prefill)
+	if err != nil {
+		t.Fatalf("runInteractiveInterview() error = %v", err)
+	}
+	if in.devIdentityID != "reg-dev-id" {
+		t.Errorf("devIdentityID = %q, want the prefilled registry value", in.devIdentityID)
+	}
+	if in.reviewerIdentityID != "agent-identity-reviewer-01" {
+		t.Errorf("reviewerIdentityID = %q, want the script-typed value (no registry match → prompt fallback)", in.reviewerIdentityID)
+	}
+}
+
+// TestRunInteractiveInterview_DiscoveryPinsTenantToTokenSource proves US-0015
+// AC-15.1 at the discovery call site: the token minted for discovery is scoped
+// to the resolved tenant. A capturing token source records the tenant it was
+// asked to mint for; it then errors so the interview falls back to the script.
+func TestRunInteractiveInterview_DiscoveryPinsTenantToTokenSource(t *testing.T) {
+	t.Parallel()
+
+	var gotTenant string
+	capturing := func(_ context.Context, tenant string) (string, error) {
+		gotTenant = tenant
+		return "", errors.New("stop after capturing the tenant")
+	}
+
+	_, err := runInteractiveInterview(context.Background(), newInteractiveScript(validInteractiveScriptLines()), new(strings.Builder), capturing, unreachableDiscoverer(t), nil, discoveredPrefill{tenant: "pinned-tenant"})
+	if err != nil {
+		t.Fatalf("runInteractiveInterview() error = %v", err)
+	}
+	if gotTenant != "pinned-tenant" {
+		t.Errorf("discovery token minted for tenant %q, want the resolved %q (US-0015 AC-15.1)", gotTenant, "pinned-tenant")
+	}
+}
+
+// TestRunInteractiveInterview_NoTenant_SkipsDiscovery proves US-0015 AC-15.5: a
+// fresh install with no resolved tenant never mints a token — the token source
+// is untouched — and prints the skip note, then prompts every field from the
+// script.
+func TestRunInteractiveInterview_NoTenant_SkipsDiscovery(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	tokenSrc := func(context.Context, string) (string, error) {
+		called = true
+		return "", errors.New("token source must not be called with no tenant")
+	}
+
+	var transcript strings.Builder
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(validInteractiveScriptLines()), &transcript, tokenSrc, unreachableDiscoverer(t), nil, discoveredPrefill{})
+	if err != nil {
+		t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
+	}
+	if called {
+		t.Error("token source called with no resolved tenant, want discovery skipped (US-0015 AC-15.5: no unpinned mint)")
+	}
+	if !strings.Contains(transcript.String(), "skipping Azure DevOps discovery") {
+		t.Errorf("transcript = %q, want the skip note", transcript.String())
+	}
+	if in.trackerOrg != "contoso" {
+		t.Errorf("trackerOrg = %q, want the manually typed value from the script", in.trackerOrg)
+	}
+}
+
+// TestValidateADOBeforeWrite_PinsTenantToTokenSource proves US-0015 AC-15.1 at
+// the pre-write validation call site: the probe token is minted scoped to the
+// interviewed tenant.
+func TestValidateADOBeforeWrite_PinsTenantToTokenSource(t *testing.T) {
+	t.Parallel()
+
+	var gotTenant string
+	capturing := func(_ context.Context, tenant string) (string, error) {
+		gotTenant = tenant
+		return "tok", nil
+	}
+	okValidate := func(context.Context, string, string) error { return nil }
+
+	var out strings.Builder
+	if !validateADOBeforeWrite(context.Background(), capturing, okValidate, "my-tenant", "contoso", &out) {
+		t.Fatalf("validateADOBeforeWrite() = false, want true (out: %s)", out.String())
+	}
+	if gotTenant != "my-tenant" {
+		t.Errorf("validation token minted for tenant %q, want the pinned %q (US-0015 AC-15.1)", gotTenant, "my-tenant")
+	}
+}
+
+// TestRunInteractiveInterview_DiscoveryPrefillsBaseBranch proves derivation 2: a
+// successful discovery offers the selected repo's default branch (refs/heads/
+// stripped) as the base_branch prompt default, so a blank Enter confirms it.
+func TestRunInteractiveInterview_DiscoveryPrefillsBaseBranch(t *testing.T) {
+	t.Parallel()
+
+	srv := fakeADOServer(t,
+		`{"id":"11111111-0000-4000-8000-000000000001"}`,
+		`{"count":1,"value":[{"accountId":"22222222-0000-4000-8000-000000000002","accountName":"contoso"}]}`,
+		`{"count":1,"value":[{"id":"33333333-0000-4000-8000-000000000003","name":"mandat-pilot"}]}`,
+		`{"count":1,"value":[{"id":"44444444-0000-4000-8000-000000000004","name":"mandat","remoteUrl":"https://dev.azure.com/contoso/mandat-pilot/_git/mandat","defaultBranch":"refs/heads/develop"}]}`,
+	)
+
+	lines := validInteractiveScriptLines()
+	lines[0] = "" // tracker.org: accept discovered
+	lines[1] = "" // tracker.project: accept discovered
+	lines[7] = "" // repo url: accept discovered
+	lines[8] = "" // base_branch: accept the discovered default branch
+
+	var transcript strings.Builder
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(lines), &transcript, fakeADOTokenSource(testFakeToken), discovererFor(t, srv), nil, discoveryTenantPrefill())
+	if err != nil {
+		t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
+	}
+	if in.baseBranch != "develop" {
+		t.Errorf("baseBranch = %q, want the discovered default branch 'develop' (refs/heads/ stripped)", in.baseBranch)
+	}
+	if !strings.Contains(transcript.String(), "[develop]") {
+		t.Errorf("transcript = %q, want the base_branch prompt to show 'develop' in brackets", transcript.String())
+	}
+}
+
+// TestRunInteractiveInterview_NullDefaultBranch_PromptsForBaseBranch proves the
+// derivation-2 fallback: an empty repo reports a null defaultBranch (discovery
+// leaves DefaultBranch ""), so base_branch has no bracketed default and is
+// required — the value comes from the prompt, not discovery.
+func TestRunInteractiveInterview_NullDefaultBranch_PromptsForBaseBranch(t *testing.T) {
+	t.Parallel()
+
+	srv := fakeADOServer(t,
+		`{"id":"11111111-0000-4000-8000-000000000001"}`,
+		`{"count":1,"value":[{"accountId":"22222222-0000-4000-8000-000000000002","accountName":"contoso"}]}`,
+		`{"count":1,"value":[{"id":"33333333-0000-4000-8000-000000000003","name":"mandat-pilot"}]}`,
+		`{"count":1,"value":[{"id":"44444444-0000-4000-8000-000000000004","name":"mandat","remoteUrl":"https://dev.azure.com/contoso/mandat-pilot/_git/mandat","defaultBranch":null}]}`,
+	)
+
+	lines := validInteractiveScriptLines()
+	lines[0] = ""        // accept discovered org
+	lines[1] = ""        // accept discovered project
+	lines[7] = ""        // accept discovered repo url
+	lines[8] = "release" // base_branch has no default → typed at the prompt
+
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(lines), new(strings.Builder), fakeADOTokenSource(testFakeToken), discovererFor(t, srv), nil, discoveryTenantPrefill())
+	if err != nil {
+		t.Fatalf("runInteractiveInterview() error = %v", err)
+	}
+	if in.baseBranch != "release" {
+		t.Errorf("baseBranch = %q, want the typed 'release' (null default branch → required prompt)", in.baseBranch)
 	}
 }

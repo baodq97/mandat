@@ -87,12 +87,16 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("discovery: status %d: %s", e.Status, e.Body)
 }
 
-// Repository is one discovered git repository: its stable id, name, and the
-// remote clone URL a later slice would git-clone or push to.
+// Repository is one discovered git repository: its stable id, name, the remote
+// clone URL a later slice would git-clone or push to, and its default branch
+// with the refs/heads/ ref prefix stripped. DefaultBranch is empty for a repo
+// the API reports with a null defaultBranch (an empty repo has no default
+// branch yet), so a caller prefills the branch or falls back to prompting.
 type Repository struct {
-	ID        string
-	Name      string
-	RemoteURL string
+	ID            string
+	Name          string
+	RemoteURL     string
+	DefaultBranch string
 }
 
 // Project is one discovered ADO project and its git repositories.
@@ -223,7 +227,15 @@ func (c *Client) Discover(ctx context.Context, token string) (Result, error) {
 		}
 		repositories := make([]Repository, 0, len(repos.Value))
 		for _, r := range repos.Value {
-			repositories = append(repositories, Repository(r))
+			// defaultBranch arrives fully qualified (refs/heads/main) and is null
+			// for an empty repo; strip the ref prefix, and a null yields "" (the
+			// zero value), which the caller reads as "no default branch to offer".
+			repositories = append(repositories, Repository{
+				ID:            r.ID,
+				Name:          r.Name,
+				RemoteURL:     r.RemoteURL,
+				DefaultBranch: strings.TrimPrefix(r.DefaultBranch, "refs/heads/"),
+			})
 		}
 		resolved.Projects = append(resolved.Projects, Project{ID: p.ID, Name: p.Name, Repositories: repositories})
 	}
@@ -340,7 +352,8 @@ type repositoriesResponse struct {
 }
 
 type repositoryEntry struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	RemoteURL string `json:"remoteUrl"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	RemoteURL     string `json:"remoteUrl"`
+	DefaultBranch string `json:"defaultBranch"`
 }
