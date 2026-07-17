@@ -213,3 +213,20 @@ Format: `date | what escaped | where it should have been caught | lesson | encod
   contract fit one run | dev-playbook.md step 4 rewritten on the VM (this
   arc); the paid partial was complete + green, salvaged and promoted
   dev-side (f1e509d, author preserved); this entry
+- 2026-07-17 | The entry-19 playbook fix (agent self-checks with a quick
+  smoke test, not the full `make check`) over-corrected: "quick smoke check"
+  was written as `go build` + changed-package `go test`, which DROPPED
+  golangci-lint. WI #39 (slice 4) then shipped a real lint failure a
+  `go test`-only self-check cannot see - `thelper: test helper should call
+  t.Helper()` - and the independent verify caught it as BLOCK on a red gate
+  | fixing the budget sink (entry 19) by removing the whole gate also
+  removed lint, which catches a class (`thelper`, `gosec`, style) that
+  compile + test never surface; the fix optimized for one failure mode
+  (budget) and reopened another (lint escapes) | the agent's self-check
+  must include `make lint` (fast, catches what tests can't) plus `go build`
+  plus the changed package's `go test`; only the slow sinks get dropped -
+  the full `-race ./...` suite and govulncheck, which the verify plane
+  re-runs. A budget fix that drops a check must name which failure class it
+  stops catching | dev-playbook.md step 4 re-refined to keep `make lint`
+  (this arc); #39's one-line t.Helper was fixed at integration and promoted
+  (3080c3c); this entry
