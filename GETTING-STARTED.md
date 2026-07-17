@@ -115,67 +115,30 @@ mandat moves the item to the configured in-progress state (default `Doing`) on d
 comments at dispatch, PR open, and hold, and links the PR. A human moves the item to Done.
 mandat never writes a Done state.
 
-## 5. Write the config
+## 5. Configure with `mandat init`
 
-Write `/etc/mandat/config.yaml`, root-owned. Every field below maps to the loader schema.
-
-```yaml
-tracker:
-  kind: azure-devops
-  org: contoso
-  project: mandat-pilot
-  states:
-    in_progress: Doing        # default; the state serve applies on dispatch
-
-auth:
-  mode: client-certificate    # or arc-managed-identity in production
-
-entra:
-  tenant: <tenant-id>
-  blueprint: <blueprint-app-id>
-  identity_mode: agent-user-pair
-
-repos:
-  app:                        # the repo key; the board tag is repo:app
-    url: https://dev.azure.com/contoso/mandat-pilot/_git/app
-    base_branch: main
-    paths:                    # the remit; every file the gates read must be listed
-      - go.mod                # the gate cannot build without the module files
-      - go.sum
-      - Makefile
-      - .golangci.yml
-      - cmd/
-      - internal/
-    gates:
-      - make check
-
-roles:
-  dev:
-    agent_identity_id: <dev-identity-object-id>
-    agent_user_id: <dev-agent-user-object-id>
-    agent_user_name: <dev-agent-user-upn>   # the tracker matches assignment on this
-    autonomy_ceiling: draft-pr
-    model_tier: sonnet
-    playbook: /etc/mandat/playbooks/dev.md
-  reviewer:
-    agent_identity_id: <reviewer-identity-object-id>
-    agent_user_id: <reviewer-agent-user-object-id>
-    agent_user_name: <reviewer-agent-user-upn>
-    autonomy_ceiling: report
-    playbook: /etc/mandat/playbooks/reviewer.md
-
-runner:
-  pool_size: 2                # concurrent in-flight tasks; 1 is single-in-flight
-
-budget:
-  max_usd_per_run: 5.00
-  max_usd_in_flight: 10.00    # caps total across all in-flight runs
+```sh
+sudo mandat init
 ```
 
-`paths` is the mechanical remit. If a gate needs a file, list it, or the gate re-run fails
-in the sparse worktree. For `make check` that means `Makefile` and `.golangci.yml`.
+`init` writes `/etc/mandat/config.yaml`, root-owned. It discovers the ADO org, project,
+and repo URL from your `az` login where reachable, and prompts for everything it cannot
+discover: the Entra identity ids and UPNs from step 2, `auth.mode`, `entra.tenant` and
+`entra.blueprint`, the repo's remit paths and gates, `autonomy_ceiling`, and
+`budget.max_usd_per_run`. `paths` is the mechanical remit: a gate that needs a file needs
+it listed, or the gate re-run fails in the sparse worktree.
 
-Set the runtime secrets outside the config file:
+`init` also writes both role playbooks from built-in templates and asks whether to
+install a systemd user unit for always-on `serve` (default no; see step 7). Before
+writing anything it prints a diff of the changes and asks you to confirm. Run it again
+anytime: it offers each value already on disk as the prompt default, so pressing Enter
+through every prompt leaves the file byte-identical.
+
+For CI or a scripted install, pass `--non-interactive` and supply every value as a flag.
+
+`init` does not set runtime secrets. Keep these outside the config file, and in the env
+file the systemd unit sources (`/etc/mandat/mandat.env`) if you asked `init` to install
+one:
 
 - `MANDAT_CLIENT_SECRET_FILE` points at a `0600` file holding the blueprint client secret,
   or set `MANDAT_CLIENT_SECRET` inline. Production mode (Arc) needs neither.
@@ -183,30 +146,15 @@ Set the runtime secrets outside the config file:
 - `MANDAT_DIRECT_SPAWN=1` skips per-role OS users. Use it for pilots that have not
   provisioned separate OS users yet.
 
-The playbook is the role's standing instructions in markdown. Keep it short. A Developer
-playbook says: implement one work item, self-review the diff, commit, push, write the
-`ResultContract`, stop.
-
-```markdown
-# Developer role
-You implement one work item inside your remit.
-1. Read the task and its acceptance criteria.
-2. Make the smallest change that satisfies them.
-3. Self-review your own diff.
-4. Commit and push your branch.
-5. Write the ResultContract to $MANDAT_RESULT_PATH.
-6. Stop. Do not open more than one PR.
-```
-
 ## 6. Preflight with doctor
+
+`init` already ran these checks as its closing preflight. Re-run them anytime:
 
 ```sh
 mandat doctor --config /etc/mandat/config.yaml
 ```
 
-`doctor` checks the `claude` CLI floor, git, the SQLite journal, tracker reachability
-(it mints a real token through the configured chain), disk headroom, and that the Reviewer
-identity differs from the Dev identity. Fix every FAIL before the first run.
+Fix every FAIL before the first run.
 
 ## 7. First run
 
@@ -221,26 +169,9 @@ criteria filled) and watch it move: `Doing` plus a dispatch comment, then a link
 PR, then verification, then `in-review`. A hold lands as `needs-human` with a reason
 comment.
 
-For always-on, install a systemd user unit that sources the env file:
-
-```ini
-# ~/.config/systemd/user/mandat.service
-[Unit]
-Description=mandat serve
-After=network-online.target
-
-[Service]
-ExecStart=/bin/sh -c 'set -a; . /etc/mandat/mandat.env; exec /usr/local/bin/mandat serve --config /etc/mandat/config.yaml'
-Restart=on-failure
-
-[Install]
-WantedBy=default.target
-```
-
-```sh
-loginctl enable-linger "$USER"
-systemctl --user enable --now mandat.service
-```
+If you asked `init` to install the systemd unit, run the two enable commands it printed
+for always-on `serve`. Otherwise `mandat serve --config /etc/mandat/config.yaml` runs in
+the foreground.
 
 ## 8. Operations
 

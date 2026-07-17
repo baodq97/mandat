@@ -156,7 +156,7 @@ config-writing and token-minting stay separate commands, mirroring the `aws conf
       a claim. `init` exits non-zero when any check reports FAIL: a sharp tri-state
       (`flutter doctor`'s model), never `brew doctor`'s advisory shrug, because this gates
       Entra identity and worktree isolation.
-- [ ] AC-13.8 GETTING-STARTED.md shrinks: steps 5 (write the config), the playbook
+- [x] AC-13.8 GETTING-STARTED.md shrinks: steps 5 (write the config), the playbook
       sub-step of step 5, and step 7's unit-file sub-step collapse into one step that
       runs `mandat init` and answers its prompts; step 2 (Entra provisioning) is unchanged
       and stays the longest step in the document, matching this story's phase-1 scope.
