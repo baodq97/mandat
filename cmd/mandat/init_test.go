@@ -836,3 +836,92 @@ func TestRunInteractiveInterview_TokenSourceFailure_FallsBackToPrompting(t *test
 		t.Fatalf("config.Load(%q) error = %v, want nil", configPath, err)
 	}
 }
+
+// TestPlaybookTemplate_Dev proves the dev half of AC-13.5: the embedded dev
+// template names the implement / self-review / commit-push / ResultContract-write
+// sequence.
+func TestPlaybookTemplate_Dev(t *testing.T) {
+	t.Parallel()
+
+	content, ok := config.PlaybookTemplate("dev")
+	if !ok {
+		t.Fatal(`PlaybookTemplate("dev") ok = false, want true`)
+	}
+	text := string(content)
+	for _, want := range []string{"commit", "push", "ResultContract"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("dev playbook missing %q; it names the commit-push/ResultContract sequence (AC-13.5)", want)
+		}
+	}
+}
+
+// TestPlaybookTemplate_Reviewer proves the reviewer half of AC-13.5: the
+// embedded reviewer template names the read / probe / report sequence and
+// carries no commit or push step. The template states "no commits" as a limit,
+// so the bare word "commit" is present by design; AC-13.5's "no commit step"
+// means no git commit command, which is what the dev template carries.
+func TestPlaybookTemplate_Reviewer(t *testing.T) {
+	t.Parallel()
+
+	content, ok := config.PlaybookTemplate("reviewer")
+	if !ok {
+		t.Fatal(`PlaybookTemplate("reviewer") ok = false, want true`)
+	}
+	text := string(content)
+	for _, want := range []string{"probe", "report"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("reviewer playbook missing %q; it names the read/probe/report sequence (AC-13.5)", want)
+		}
+	}
+	if strings.Contains(text, "push") {
+		t.Errorf("reviewer playbook contains %q, want no push step (AC-13.5)", "push")
+	}
+	if strings.Contains(text, "git commit") {
+		t.Error("reviewer playbook contains a git commit step, want none (AC-13.5)")
+	}
+}
+
+// TestPlaybookTemplate_UnknownRole proves the accessor's ok contract: a role
+// with no shipped template returns ok=false and nil content.
+func TestPlaybookTemplate_UnknownRole(t *testing.T) {
+	t.Parallel()
+
+	content, ok := config.PlaybookTemplate("nope")
+	if ok {
+		t.Error(`PlaybookTemplate("nope") ok = true, want false (no shipped template)`)
+	}
+	if content != nil {
+		t.Errorf(`PlaybookTemplate("nope") content = %q, want nil`, content)
+	}
+}
+
+// TestInitCmd_WritesPerRolePlaybooks proves AC-13.5 end to end: init writes the
+// embedded playbook template to each role's configured playbook path beside the
+// config, and the written content differs per role (the reviewer's has no push
+// step).
+func TestInitCmd_WritesPerRolePlaybooks(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	var stdout, stderr strings.Builder
+	if code := initCmd(validInitArgs(configPath), strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("initCmd() code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+
+	configDir := filepath.Dir(configPath)
+	dev, err := os.ReadFile(filepath.Join(configDir, "playbooks", "dev.md"))
+	if err != nil {
+		t.Fatalf("read dev playbook: %v", err)
+	}
+	reviewer, err := os.ReadFile(filepath.Join(configDir, "playbooks", "reviewer.md"))
+	if err != nil {
+		t.Fatalf("read reviewer playbook: %v", err)
+	}
+
+	if string(dev) == string(reviewer) {
+		t.Error("dev and reviewer playbooks are identical, want per-role content (AC-13.5)")
+	}
+	if strings.Contains(string(reviewer), "push") {
+		t.Errorf("reviewer playbook contains %q, want no push step (AC-13.5)", "push")
+	}
+}

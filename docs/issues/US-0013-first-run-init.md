@@ -135,7 +135,7 @@ config-writing and token-minting stay separate commands, mirroring the `aws conf
       file returns a `ValidationErrors` value whose `FieldError.Path` names the exact
       dotted field (e.g. `roles.dev.agent_user_name`) and whose `Reason` states the fix,
       matching the existing `FieldError` shape rather than a generic parse failure.
-- [ ] AC-13.5 Given the operator selects the `dev` and `reviewer` roles during the
+- [x] AC-13.5 Given the operator selects the `dev` and `reviewer` roles during the
       interview, observe `init` writes the embedded playbook template to each role's
       configured `playbook` path, and the written content differs per role: the `dev`
       template names the remit-scoped implement / self-review / commit-push /

@@ -183,6 +183,41 @@ func writeConfig(in nonInteractiveInput, configPath string, stdout, stderr io.Wr
 		return 1
 	}
 	fmt.Fprintf(stdout, "mandat init: wrote %s\n", configPath)
+	if code := writePlaybooks(configPath, stdout, stderr); code != 0 {
+		return code
+	}
+	return 0
+}
+
+// writePlaybooks writes each role's embedded playbook template to the path
+// render recorded in config.yaml, resolving a relative path against the config
+// dir so the config's playbook: value points at the file this created (AC-13.5).
+func writePlaybooks(configPath string, stdout, stderr io.Writer) int {
+	configDir := filepath.Dir(configPath)
+	roles := []struct{ role, path string }{
+		{"dev", devPlaybookPath},
+		{"reviewer", reviewerPlaybookPath},
+	}
+	for _, r := range roles {
+		content, ok := config.PlaybookTemplate(r.role)
+		if !ok {
+			fmt.Fprintf(stderr, "mandat init: no embedded playbook for role %s\n", r.role)
+			return 1
+		}
+		path := r.path
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(configDir, path)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			fmt.Fprintf(stderr, "mandat init: create %s: %v\n", filepath.Dir(path), err)
+			return 1
+		}
+		if err := os.WriteFile(path, content, 0o644); err != nil { //nolint:gosec // G306: playbook is non-secret prose, deliberately group/other-readable (config alone stays 0o600)
+			fmt.Fprintf(stderr, "mandat init: write %s: %v\n", path, err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "mandat init: wrote %s\n", path)
+	}
 	return 0
 }
 
