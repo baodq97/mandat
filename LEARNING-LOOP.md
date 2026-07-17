@@ -259,3 +259,37 @@ Format: `date | what escaped | where it should have been caught | lesson | encod
   (did not block US-0013): prompt `entra.tenant` first and pin the discovery +
   validation token to it, removing the active-session dependency. Charter as a
   small US against US-0013 | recorded here; flagged to owner
+- 2026-07-17 | US-0015's tenant pin shipped as a picker over `az account list`
+  plus a per-mint pin, but two defects surfaced ONLY when live-tested with az
+  active on a DIFFERENT tenant than the target (unit tests and every earlier
+  live run had baotest pre-activated, so both stayed hidden): (a) `az account
+  get-access-token --tenant <non-active>` forces a fresh interactive login —
+  unusable non-interactively; `--subscription <az-account-id>` mints cleanly,
+  so pin by ACCOUNT id, not tenant id; (b) `pickTenant` treated a typed
+  listed-tenant id as an accountless override, so the mint fell back to the
+  active account and discovery 401'd | the operator's real condition (az on the
+  wrong tenant) is the ONE case the fixtures never modeled; a pre-activated
+  tenant was a hidden precondition | fixed both with a RED test per bug,
+  live-verified reaching the org from a non-active tenant with no `az account
+  set`; US-0015/US-0016 flipped done after the ACs were reworded to certify the
+  shipped `--subscription` mechanism | done
+- 2026-07-17 | Treated the blueprint client-secret as a hard blocker for
+  agent-USER create (research step 5's "recommended client"); loading tmem
+  showed the spike created everything via the operator's DELEGATED az Graph
+  token, and a live probe confirmed delegated user-create -> 201 with no secret
+  | a research "recommended" path is not the only path; the actual dogfood
+  mechanism lived in memory, not the doc — recall before declaring blocked |
+  the delegated path works only because the operator is an Agent-ID admin; the
+  customer-correct PRODUCTION path is the blueprint's OWN client-cred with a
+  self-consented `AgentIdUser.ReadWrite.IdentityParentedBy` + `AgentIdentity.
+  CreateAsManager`, both proven live end to end (identity+user via the blueprint
+  client-cred, with retry-backoff for the create->use propagation lag = AC-14.5)
+  | recorded; provision's write path redirect to the blueprint-client-cred flow
+  is a follow-up
+- 2026-07-17 | A throwaway agentUser leaked on the tenant because a cleanup
+  snippet did `UID=$(...)`: `UID` is a bash readonly special var, the
+  assignment silently failed, and the DELETE hit the shell's numeric UID -> 404
+  -> the object stayed behind | a 404 on delete was read as "already gone" when
+  it was "wrong id"; a create->delete race also 404s a just-created object |
+  never name a shell var `UID`; verify cleanup with a post-list, not the delete
+  exit code; retry deletes through propagation | recorded
