@@ -39,7 +39,7 @@ environment variable, or typed answer.
   `entra.tenant` value feeds; `azCLITokenSource` mints the discovery and validation tokens
   against whichever tenant is resolved by the time those calls run.
 - `cmd/mandat/init.go`: `resolvePrefill`, `roleIdentitiesFromRegistry`,
-  `defaultBranchForRepoURL`, `deriveTenant`/`productionDeriveTenant`, `discoverEntra`/
+  `defaultBranchForRepoURL`, `chooseTenant`/`listTenants`/`pickTenant`, `discoverEntra`/
   `productionDiscoverEntra`, and the merge helpers (`mergeEnvIntoUnset`,
   `mergeEnvOverPrior`) this story's fields flow through.
 - `internal/entra/entra.go`: `Client.DiscoverRegistry`, `Registry.PairedUser`, the read-only
@@ -60,7 +60,10 @@ accept commit, citing this story and the pilot evidence above.
 Three fields derive automatically on a fresh install, when the machine has the session or
 registry access to know them, and fall back to a prompt otherwise:
 
-- `entra.tenant`, from the active `az` session's tenant id claim (`az account show`).
+- `entra.tenant`, chosen by the operator from the tenants the `az` session can reach (`az
+  account list --all`): a sole tenant auto-picks, several present a numbered picker, an
+  `--entra-tenant` override skips enumeration entirely. The chosen tenant's az account id pins
+  every mint via `--subscription` (US-0015).
 - The registered repo's `base_branch`, from the ADO repository's `defaultBranch`, stripped of
   its `refs/heads/` prefix.
 - The six role-identity fields, `roles.dev.agent_identity_id`/`agent_user_id`/
@@ -76,7 +79,7 @@ repo url.
 ## Non-goal
 
 Creating or provisioning identities. `internal/entra`'s write side (`CreateAgentIdentity`,
-`EnsureAgentIdentity`, `DeleteAgentIdentity`) belongs to US-0014's `mandat provision` ladder.
+`EnsureAgentIdentity`) belongs to US-0014's `mandat provision` ladder.
 This story only reads the registry (`DiscoverRegistry`, `ListBlueprints`,
 `ListAgentIdentities`, `ListAgentUsers`) to prefill `init`'s interview; it issues no Graph or
 ADO write call.
@@ -84,12 +87,14 @@ ADO write call.
 ## Acceptance criteria
 
 - [ ] AC-16.1 Given a fresh install (no existing `/etc/mandat/config.yaml`, and no env-seeded
-      prior either), `resolvePrefill` calls `deriveTenant` (`az account show --query
-      tenantId`) and the interview offers the result as the bracketed default for
-      `entra.tenant` (`iv.requiredWithDefault("entra.tenant", p.entraTenant, nil)`). The
-      resolved tenant is the same value `attemptDiscovery` and `validateADOBeforeWrite` pin
-      the ADO discovery and pre-write validation tokens to (US-0015 AC-15.1, AC-15.2), never
-      `az`'s ambient default.
+      prior either), `resolvePrefill` calls `chooseTenant`, which enumerates tenants via
+      `listTenants` (`az account list --all`) and, with several, has the operator pick one via
+      `pickTenant`; the interview offers the chosen tenant as the bracketed default for
+      `entra.tenant` (`iv.requiredWithDefault("entra.tenant", p.entraTenant, nil)`). Its az
+      account id pins the ADO discovery and pre-write validation tokens via `--subscription`
+      (US-0015 AC-15.1, AC-15.2) to the operator-chosen account, not az's ambient default. An
+      explicit `--entra-tenant` override carries no az account, so its mints fall back to az's
+      active account (the operator is expected to have that tenant active, init.go note).
 - [ ] AC-16.2 Given a successful discovery run, `defaultBranchForRepoURL` reads the matched
       repository's `defaultBranch`, already stripped of its `refs/heads/` prefix by
       `internal/discovery`, and the interview offers it as the bracketed default for `repo
@@ -112,7 +117,7 @@ ADO write call.
       any env-seeded prior), observe `resolvePrefill` returns an empty prefill and issues no
       `az` or Graph call at all: a re-run opts out of derivation entirely and offers the prior
       config value as the default instead.
-- [ ] AC-16.5 Given `deriveTenant` or `discoverEntra` returns an error (az absent, logged out,
+- [ ] AC-16.5 Given `listTenants`/`chooseTenant` or `discoverEntra` returns an error (az absent, logged out,
       or the Graph registry unreachable), observe `resolvePrefill` leaves the corresponding
       field or fields empty rather than propagating the error, and the interview prompts for
       `entra.tenant` from scratch (printing a note and skipping ADO discovery, per US-0015
@@ -120,8 +125,9 @@ ADO write call.
       exits non-zero, hangs, or hard-fails because the registry or `az` is unreachable; the
       affected field alone degrades to a plain prompt.
 - [ ] AC-16.6 Every derivation path in AC-16.1 through AC-16.5 is exercised by a contract test
-      substituting an injectable seam, never a live `az` or Graph call: `deriveTenant` and
-      `discoverEntra` are package-level `var` seams a test reassigns to a fake; the tenant pin
+      substituting an injectable seam, never a live `az` or Graph call: `listTenants` and
+      `discoverEntra` are package-level `var` seams a test reassigns to a fake
+      (`cmd/mandat/init.go:1020,1112`; reassigned at `init_test.go:1715,1725`); the tenant pin
       on the underlying `az` invocation is proven through the `tokenSource` func-field seam;
       and the registry reads themselves are proven against an `httptest` server through
       `entra.Config.GraphBaseURL`. Reverting any one derivation reproduces a failing test, not

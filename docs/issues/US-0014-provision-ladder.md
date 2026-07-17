@@ -23,7 +23,10 @@ patterns 1 and 11 (config-writing and token-minting stay separate, composable ve
 split this story applies to blueprint/identity writes vs. token minting). `GETTING-STARTED.md`
 §2 (the manual runbook this story automates). US-0013 (neighbor story: the first-run interview
 whose AC-13.1 discovery and AC-13.3 irreducible per-role identity fields consume the registry
-this story produces, via pickers).
+this story produces, via pickers). `docs/research/init-provision-pilot.md` (piloted
+2026-07-17 on the dogfood Entra tenant and ADO org): finding F1 resolves the least-privilege
+Gap below positive for the owner agent-identity create/delete path; F2 and F4 ground the
+`internal/entra` / `cmd/mandat/provision.go` create ensure-flows that already ship on `main`.
 
 ## Background: the deferral this story resolves
 
@@ -146,12 +149,19 @@ story.
 
 ## Gaps
 
-- The least-privilege `az` scope question is open: which Graph delegated scopes Azure CLI's
-  first-party client can actually carry for the Agent ID endpoints
-  (`AgentIdentityBlueprint.Create`, `AgentIdentity.Create.All`). The research doc's dogfood
-  run proved the calls work under a privileged operator's az token; it did not isolate the
-  minimum scope. This story needs a spike to pin the least-priv az scope check before
-  implementation.
+- The least-privilege `az` scope question is half-resolved, not fully open:
+  `docs/research/init-provision-pilot.md` finding F1 pilots the owner agent-identity
+  create/delete path live — as the blueprint owner, an ordinary az-minted Graph token (no
+  `AgentIdentity*`-named scope) authorized `POST
+  .../servicePrincipals/microsoft.graph.agentIdentity` (201) and `DELETE
+  .../servicePrincipals/{id}` (204). `internal/entra.CreateAgentIdentity`/
+  `EnsureAgentIdentity`, wired through `cmd/mandat/provision.go`'s `--ensure-identity`,
+  already implement this path and ship on `main`. Still genuinely open, because the pilot
+  ran against an already-owned blueprint and never exercised it: the one-time
+  `AgentIdentityBlueprint.Create` scope for `EnsureBlueprint`'s blueprint-creation write,
+  which the research doc still ties to the privileged Agent ID Developer/Administrator
+  role. The remaining spike narrows from "the whole ladder's least-priv scope" to just the
+  blueprint-creation step.
 - UPN domain selection for the agent user (which verified tenant domain to use) is flagged as
   open in the research doc and is not resolved here. It may need its own picker in
   `ensure-role-identity`, or may be safe to default; undetermined until the spike above runs.

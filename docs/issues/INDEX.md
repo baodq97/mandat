@@ -16,5 +16,5 @@
 | [US-0012](US-0012-concurrent-task-dispatch.md) | Concurrent task dispatch (runner pool slice) | done | baodq97 | 2026-07-16 |
 | [US-0013](US-0013-first-run-init.md) | First-run experience — `mandat init` guided setup | done | baodq97 | 2026-07-16 |
 | [US-0014](US-0014-provision-ladder.md) | Provisioning ladder — `mandat provision` ensure-flows for Entra Agent ID | open | baodq97 | 2026-07-16 |
-| [US-0015](US-0015-discovery-token-tenant-pin.md) | Pin the discovery token to the configured Entra tenant | open | baodq97 | 2026-07-17 |
+| [US-0015](US-0015-discovery-token-tenant-pin.md) | Pin the discovery token to the operator-chosen Entra tenant | open | baodq97 | 2026-07-17 |
 | [US-0016](US-0016-init-auto-derive.md) | Auto-derive first-run config from the az session and Agent-ID registry | open | baodq97 | 2026-07-17 |
