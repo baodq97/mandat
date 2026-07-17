@@ -118,12 +118,14 @@ config-writing and token-minting stay separate commands, mirroring the `aws conf
       (`tracker.kind`: hardcoded to `azure-devops`, the only tracker phase 1 ships;
       `entra.identity_mode`: hardcoded to `agent-user-pair`, ADR-0005's recommended mode
       for Azure DevOps); values discovered from the operator's existing `az` session
-      (`tracker.org`, `tracker.project`, `repos.<>.url`, `repos.<>.base_branch`: the AC-13.1
-      ADO chain; `entra.tenant`: the az session's tenant claim); and template-derived paths
+      (`tracker.org`, `tracker.project`, `repos.<>.url`: the AC-13.1 ADO chain, which
+      resolves the repo but not its default branch); and template-derived paths
       (`roles.<>.playbook`: the path AC-13.5's embedded template is written to). (c)
       Irreducible prompts, where no discovery signal or default exists: confirming the
       discovered tracker org/project (accept or override), which discovered repo(s) to
-      register plus each one's remit `paths` and `gates`, `auth.mode`, `entra.blueprint`
+      register plus each one's `base_branch` (the ADO chain resolves the repo, not its
+      default branch) and remit `paths` and `gates`, `auth.mode`, `entra.tenant` (the az
+      token's tenant claim is not decoded, so `init` prompts it), `entra.blueprint`
       (phase 1 ships no registry to pick it from, so `init` always prompts it), the six
       role-identity fields `roles.<>.agent_identity_id`, `roles.<>.agent_user_id`, and
       `roles.<>.agent_user_name` for dev and reviewer (phase 1 prompts these; US-0014's
