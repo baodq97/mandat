@@ -129,13 +129,19 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	autonomyCeiling := fs.String("autonomy-ceiling", "", "dev role autonomy ceiling: report, draft-pr, or unattended")
 	maxUSDPerRun := fs.Float64("max-usd-per-run", 0, "per-run cost ceiling (budget.max_usd_per_run)")
 	installSystemdUnit := fs.Bool("install-systemd-unit", false, "also write a systemd user unit for always-on serve to the operator's ~/.config/systemd/user (default: no unit written)")
+	yesFlag := fs.Bool("yes", false, "skip the pre-write diff confirmation (for automation)")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
+	// One buffered reader for the whole run: the interactive interview and the
+	// pre-write confirm draw from the same buffer, so bytes the interview read
+	// ahead stay available to the confirm rather than being lost (AC-13.12).
+	reader := bufio.NewReader(stdin)
+
 	if !*nonInteractiveFlag && isTTY(stdin) {
-		interviewed, err := runInteractiveInterview(context.Background(), stdin, stdout, azCLITokenSource, productionDiscoverer)
+		interviewed, err := runInteractiveInterview(context.Background(), reader, stdout, azCLITokenSource, productionDiscoverer)
 		if err != nil {
 			fmt.Fprintf(stderr, "mandat init: %v\n", err)
 			return 1
@@ -144,7 +150,8 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "mandat init: %v\n", err)
 			return 1
 		}
-		if code := writeConfig(interviewed, *configPath, stdout, stderr); code != 0 {
+		// A TTY operator still confirms the diff unless they passed --yes.
+		if code := writeConfig(interviewed, *configPath, reader, *yesFlag, stdout, stderr); code != 0 {
 			return code
 		}
 		return finishInit(context.Background(), *configPath, stdout, stderr)
@@ -180,23 +187,44 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	if code := writeConfig(in, *configPath, stdout, stderr); code != 0 {
+	// The --non-interactive and non-TTY autodetect paths both imply --yes: no
+	// prompt of any kind fires, so the diff prints but is never gated (AC-13.9).
+	if code := writeConfig(in, *configPath, reader, true, stdout, stderr); code != 0 {
 		return code
 	}
 	return finishInit(context.Background(), *configPath, stdout, stderr)
 }
 
-// writeConfig renders in and writes it to configPath, the one emit path
-// both the --non-interactive and interactive callers of initCmd share
-// (reuse the render function, never fork it: one emit path for both callers).
-func writeConfig(in nonInteractiveInput, configPath string, stdout, stderr io.Writer) int {
-	yamlText := in.render()
+// writeConfig renders in and writes it to configPath, the one emit path both
+// the --non-interactive and interactive callers of initCmd share (reuse the
+// render function, never fork it: one emit path for both callers). Before
+// touching disk it prints a diff of what the write changes in config.yaml
+// (AC-13.12) — always, on both paths — then, unless skipConfirm, gates the
+// whole write (config, playbooks, systemd unit) on a [y/N] confirmation read
+// from reader. skipConfirm is set by --yes and implied by the
+// --non-interactive and non-TTY paths (AC-13.9), which suppress every prompt.
+func writeConfig(in nonInteractiveInput, configPath string, reader *bufio.Reader, skipConfirm bool, stdout, stderr io.Writer) int {
+	newContent := in.render()
+
+	old, err := os.ReadFile(configPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(stderr, "mandat init: read %s: %v\n", configPath, err)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "mandat init: config.yaml changes (%s):\n", configPath)
+	fmt.Fprint(stdout, renderConfigDiff(string(old), newContent))
+
+	if !skipConfirm && !confirmYesNo(reader, stdout, "Write these changes?") {
+		fmt.Fprintln(stdout, "mandat init: aborted; no changes written")
+		return 1
+	}
 
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o750); err != nil {
 		fmt.Fprintf(stderr, "mandat init: create %s: %v\n", filepath.Dir(configPath), err)
 		return 1
 	}
-	if err := os.WriteFile(configPath, []byte(yamlText), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(newContent), 0o600); err != nil {
 		fmt.Fprintf(stderr, "mandat init: write %s: %v\n", configPath, err)
 		return 1
 	}
@@ -210,6 +238,84 @@ func writeConfig(in nonInteractiveInput, configPath string, stdout, stderr io.Wr
 		}
 	}
 	return 0
+}
+
+// renderConfigDiff shows what writing newContent changes in an existing
+// config.yaml: a hand-rolled line diff over a longest-common-subsequence table
+// (ADR-0002's last rung — stdlib carries no diff and a module dependency is
+// disproportionate for a config-diff display in a three-dependency static
+// binary). Unchanged lines are prefixed "  ", removed lines "- ", added lines
+// "+ ". A fresh install (oldContent == "", the file did not exist) has no old
+// lines, so every new line renders as an addition — the diff shown is the whole
+// file (AC-13.12).
+func renderConfigDiff(oldContent, newContent string) string {
+	oldLines := splitConfigLines(oldContent)
+	newLines := splitConfigLines(newContent)
+	m, n := len(oldLines), len(newLines)
+
+	// lcs[i][j] is the length of the longest common subsequence of
+	// oldLines[i:] and newLines[j:]; the trailing row and column stay zero.
+	lcs := make([][]int, m+1)
+	for i := range lcs {
+		lcs[i] = make([]int, n+1)
+	}
+	for i := m - 1; i >= 0; i-- {
+		for j := n - 1; j >= 0; j-- {
+			if oldLines[i] == newLines[j] {
+				lcs[i][j] = lcs[i+1][j+1] + 1
+			} else if lcs[i+1][j] >= lcs[i][j+1] {
+				lcs[i][j] = lcs[i+1][j]
+			} else {
+				lcs[i][j] = lcs[i][j+1]
+			}
+		}
+	}
+
+	var b strings.Builder
+	i, j := 0, 0
+	for i < m && j < n {
+		switch {
+		case oldLines[i] == newLines[j]:
+			fmt.Fprintf(&b, "  %s\n", oldLines[i])
+			i, j = i+1, j+1
+		case lcs[i+1][j] >= lcs[i][j+1]:
+			fmt.Fprintf(&b, "- %s\n", oldLines[i])
+			i++
+		default:
+			fmt.Fprintf(&b, "+ %s\n", newLines[j])
+			j++
+		}
+	}
+	for ; i < m; i++ {
+		fmt.Fprintf(&b, "- %s\n", oldLines[i])
+	}
+	for ; j < n; j++ {
+		fmt.Fprintf(&b, "+ %s\n", newLines[j])
+	}
+	return b.String()
+}
+
+// splitConfigLines splits a config document into its lines for the diff. An
+// empty document yields no lines (not one empty line), and the single trailing
+// newline render always emits is dropped, so neither shows up as a spurious
+// blank diff row.
+func splitConfigLines(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(s, "\n"), "\n")
+}
+
+// confirmYesNo asks prompt defaulting to no and reads one answer from reader:
+// only an explicit y or yes (any case) confirms; a blank line, any other
+// answer, or a closed reader declines. It reads from the same buffered reader
+// the interview drew from — mirroring interviewer.confirm's semantics for the
+// pre-write confirmation, where no interviewer holds the reader (AC-13.12).
+func confirmYesNo(reader *bufio.Reader, out io.Writer, prompt string) bool {
+	fmt.Fprintf(out, "%s [y/N]: ", prompt)
+	line, _ := reader.ReadString('\n')
+	answer := strings.ToLower(strings.TrimSpace(line))
+	return answer == "y" || answer == "yes"
 }
 
 // systemdUnitTemplate is the always-on user unit (GETTING-STARTED §7). ExecStart
@@ -843,8 +949,8 @@ func repoURLsForProject(org discovery.Org, project string) []string {
 // defaults (Enter accepts the discovered value); any failure along the way
 // — the token source, or a typed discovery error — falls back to prompting
 // those same fields from scratch, exactly as if discovery had never run.
-func runInteractiveInterview(ctx context.Context, stdin io.Reader, out io.Writer, getToken tokenSource, discover discoverer) (nonInteractiveInput, error) {
-	iv := &interviewer{r: bufio.NewReader(stdin), w: out}
+func runInteractiveInterview(ctx context.Context, reader *bufio.Reader, out io.Writer, getToken tokenSource, discover discoverer) (nonInteractiveInput, error) {
+	iv := &interviewer{r: reader, w: out}
 	var in nonInteractiveInput
 	var err error
 

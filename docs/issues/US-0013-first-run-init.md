@@ -176,7 +176,7 @@ config-writing and token-minting stay separate commands, mirroring the `aws conf
       observe each existing value is presented as the bracketed prompt default (Enter keeps
       it), and observe fields the operator does not change come out byte-identical to the
       file before the rerun.
-- [ ] AC-13.12 Given `init` is about to write, observe it prints a diff of what will change
+- [x] AC-13.12 Given `init` is about to write, observe it prints a diff of what will change
       in `config.yaml` and asks for confirmation before writing; given `--yes`, observe the
       confirmation is skipped for automation; given a fresh install with no existing file,
       observe the diff shown is the whole file.

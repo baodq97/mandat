@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"net/http"
@@ -571,8 +572,8 @@ func validInteractiveScriptLines() []string {
 	}
 }
 
-func newInteractiveScript(lines []string) *strings.Reader {
-	return strings.NewReader(strings.Join(lines, "\n") + "\n")
+func newInteractiveScript(lines []string) *bufio.Reader {
+	return bufio.NewReader(strings.NewReader(strings.Join(lines, "\n") + "\n"))
 }
 
 // failingTokenSource simulates az missing or the operator not being logged
@@ -608,7 +609,7 @@ func TestRunInteractiveInterview_HappyPath_EmitAndReload(t *testing.T) {
 
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	var stdout, stderr strings.Builder
-	if code := writeConfig(in, configPath, &stdout, &stderr); code != 0 {
+	if code := writeConfig(in, configPath, bufio.NewReader(strings.NewReader("")), true, &stdout, &stderr); code != 0 {
 		t.Fatalf("writeConfig() code = %d, want 0 (stderr: %s)", code, stderr.String())
 	}
 
@@ -718,7 +719,7 @@ func TestRunInteractiveInterview_EnterKeepsDefault(t *testing.T) {
 	}
 
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	if code := writeConfig(in, configPath, new(strings.Builder), new(strings.Builder)); code != 0 {
+	if code := writeConfig(in, configPath, bufio.NewReader(strings.NewReader("")), true, new(strings.Builder), new(strings.Builder)); code != 0 {
 		t.Fatalf("writeConfig() code = %d, want 0", code)
 	}
 	cfg, err := config.Load(configPath)
@@ -756,7 +757,7 @@ func TestRunInteractiveInterview_OverridesDefaultedField(t *testing.T) {
 	}
 
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	if code := writeConfig(in, configPath, new(strings.Builder), new(strings.Builder)); code != 0 {
+	if code := writeConfig(in, configPath, bufio.NewReader(strings.NewReader("")), true, new(strings.Builder), new(strings.Builder)); code != 0 {
 		t.Fatalf("writeConfig() code = %d, want 0", code)
 	}
 	cfg, err := config.Load(configPath)
@@ -853,7 +854,7 @@ func TestRunInteractiveInterview_DiscoverySuccess_ConfirmProducesLoadableConfig(
 
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	var stdout, stderr strings.Builder
-	if code := writeConfig(in, configPath, &stdout, &stderr); code != 0 {
+	if code := writeConfig(in, configPath, bufio.NewReader(strings.NewReader("")), true, &stdout, &stderr); code != 0 {
 		t.Fatalf("writeConfig() code = %d, want 0 (stderr: %s)", code, stderr.String())
 	}
 	cfg, err := config.Load(configPath)
@@ -905,7 +906,7 @@ func TestRunInteractiveInterview_AmbiguousOrg_FallsBackToPrompting(t *testing.T)
 		t.Fatalf("in.validate() error = %v, want nil (transcript: %s)", err, transcript.String())
 	}
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	if code := writeConfig(in, configPath, new(strings.Builder), new(strings.Builder)); code != 0 {
+	if code := writeConfig(in, configPath, bufio.NewReader(strings.NewReader("")), true, new(strings.Builder), new(strings.Builder)); code != 0 {
 		t.Fatalf("writeConfig() code = %d, want 0", code)
 	}
 	if _, err := config.Load(configPath); err != nil {
@@ -936,7 +937,7 @@ func TestRunInteractiveInterview_TokenSourceFailure_FallsBackToPrompting(t *test
 		t.Fatalf("in.validate() error = %v, want nil (transcript: %s)", err, transcript.String())
 	}
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	if code := writeConfig(in, configPath, new(strings.Builder), new(strings.Builder)); code != 0 {
+	if code := writeConfig(in, configPath, bufio.NewReader(strings.NewReader("")), true, new(strings.Builder), new(strings.Builder)); code != 0 {
 		t.Fatalf("writeConfig() code = %d, want 0", code)
 	}
 	if _, err := config.Load(configPath); err != nil {
@@ -1162,5 +1163,228 @@ func TestFinishInit_ConfigLoadError_ReturnsOne(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "mandat init:") {
 		t.Errorf("stderr = %q, want it to name mandat init and the load error", stderr.String())
+	}
+}
+
+// validNonInteractiveInput builds a fully-populated input equivalent to
+// validInitArgs, for writeConfig/diff tests that need an in without driving the
+// whole interview or flag parse.
+func validNonInteractiveInput() nonInteractiveInput {
+	return nonInteractiveInput{
+		trackerOrg:         "baodo0220",
+		trackerProject:     "mandat-dogfood",
+		authMode:           string(config.AuthArcManagedIdentity),
+		entraTenant:        "d1a7b725-aaaa-bbbb-cccc-dddddddddddd",
+		entraBlueprint:     "blueprint-01",
+		repoRaw:            "mandat=https://dev.azure.com/baodo0220/mandat-dogfood/_git/mandat",
+		repoKey:            "mandat",
+		repoURL:            "https://dev.azure.com/baodo0220/mandat-dogfood/_git/mandat",
+		baseBranch:         "main",
+		remitPaths:         []string{"internal/", "cmd/"},
+		gates:              []string{"make check", "npx govkit check"},
+		devIdentityID:      "agent-identity-dev-01",
+		devUserID:          "agent-user-dev-01",
+		devUserUPN:         "dev-agent@baodo0220.onmicrosoft.com",
+		reviewerIdentityID: "agent-identity-reviewer-01",
+		reviewerUserID:     "agent-user-reviewer-01",
+		reviewerUserUPN:    "reviewer-agent@baodo0220.onmicrosoft.com",
+		autonomyCeiling:    string(config.CeilingDraftPR),
+		maxUSDPerRun:       5,
+	}
+}
+
+// TestRenderConfigDiff_FreshInstall_AllAdditions proves AC-13.12's fresh-install
+// clause: with no existing file (oldContent == "") every new line renders as a
+// "+ " addition, so the diff shown is the whole file.
+func TestRenderConfigDiff_FreshInstall_AllAdditions(t *testing.T) {
+	t.Parallel()
+
+	diff := renderConfigDiff("", "a\nb\nc\n")
+	want := []string{"+ a", "+ b", "+ c"}
+	got := strings.Split(strings.TrimSuffix(diff, "\n"), "\n")
+	if !slices.Equal(got, want) {
+		t.Errorf("renderConfigDiff(fresh) = %q, want every new line as a + addition %q", got, want)
+	}
+	if strings.Contains(diff, "- ") {
+		t.Errorf("renderConfigDiff(fresh) = %q, want no removals with an empty old", diff)
+	}
+}
+
+// TestRenderConfigDiff_Identical_AllContext proves an unchanged rewrite renders
+// every line as two-space context, with no +/- change rows.
+func TestRenderConfigDiff_Identical_AllContext(t *testing.T) {
+	t.Parallel()
+
+	content := "a\nb\nc\n"
+	diff := renderConfigDiff(content, content)
+	for _, line := range strings.Split(strings.TrimSuffix(diff, "\n"), "\n") {
+		if !strings.HasPrefix(line, "  ") {
+			t.Errorf("renderConfigDiff(identical) line = %q, want a two-space unchanged prefix", line)
+		}
+	}
+	if strings.Contains(diff, "+ ") || strings.Contains(diff, "- ") {
+		t.Errorf("renderConfigDiff(identical) = %q, want no +/- change rows", diff)
+	}
+}
+
+// TestRenderConfigDiff_SingleChangedLine proves one changed value line yields
+// exactly one "- " old row and one "+ " new row for that field, with every
+// other line unchanged context.
+func TestRenderConfigDiff_SingleChangedLine(t *testing.T) {
+	t.Parallel()
+
+	old := "tracker:\n  org: baodo0220\n  project: mandat\n"
+	updated := "tracker:\n  org: rebranded\n  project: mandat\n"
+	diff := renderConfigDiff(old, updated)
+
+	var removed, added, context []string
+	for _, line := range strings.Split(strings.TrimSuffix(diff, "\n"), "\n") {
+		switch {
+		case strings.HasPrefix(line, "- "):
+			removed = append(removed, strings.TrimPrefix(line, "- "))
+		case strings.HasPrefix(line, "+ "):
+			added = append(added, strings.TrimPrefix(line, "+ "))
+		default:
+			context = append(context, strings.TrimPrefix(line, "  "))
+		}
+	}
+	if want := []string{"  org: baodo0220"}; !slices.Equal(removed, want) {
+		t.Errorf("removed = %q, want exactly the changed old line %q", removed, want)
+	}
+	if want := []string{"  org: rebranded"}; !slices.Equal(added, want) {
+		t.Errorf("added = %q, want exactly the changed new line %q", added, want)
+	}
+	if want := []string{"tracker:", "  project: mandat"}; !slices.Equal(context, want) {
+		t.Errorf("context = %q, want the two unchanged lines", context)
+	}
+}
+
+// TestWriteConfig_FreshInstall_ShowsWholeFileAndWrites proves AC-13.12 on the
+// fresh path: writeConfig against a non-existent configPath prints the whole
+// rendered file as "+ " additions and writes it (skipConfirm true, so the empty
+// reader is never consulted).
+func TestWriteConfig_FreshInstall_ShowsWholeFileAndWrites(t *testing.T) {
+	t.Parallel()
+
+	in := validNonInteractiveInput()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+
+	var stdout, stderr strings.Builder
+	code := writeConfig(in, configPath, bufio.NewReader(strings.NewReader("")), true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("writeConfig() code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+
+	written, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", configPath, err)
+	}
+	out := stdout.String()
+	for _, line := range strings.Split(strings.TrimSuffix(string(written), "\n"), "\n") {
+		if !strings.Contains(out, "+ "+line) {
+			t.Errorf("diff missing %q as a + addition\n%s", line, out)
+		}
+	}
+}
+
+// TestWriteConfig_ConfirmYes_WritesAndShowsDiff proves AC-13.12's confirm path:
+// against an existing config, skipConfirm false, a scripted "y" writes the new
+// content and the diff shows the change against what was there.
+func TestWriteConfig_ConfirmYes_WritesAndShowsDiff(t *testing.T) {
+	t.Parallel()
+
+	in := validNonInteractiveInput()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("tracker:\n  org: stale\n"), 0o600); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	var stdout, stderr strings.Builder
+	code := writeConfig(in, configPath, bufio.NewReader(strings.NewReader("y\n")), false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("writeConfig() code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+
+	written, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", configPath, err)
+	}
+	if string(written) != in.render() {
+		t.Errorf("config after confirm-yes = %q, want the freshly rendered content", string(written))
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "[y/N]") {
+		t.Errorf("stdout = %q, want the [y/N] confirmation prompt", out)
+	}
+	if !strings.Contains(out, "- ") {
+		t.Errorf("stdout = %q, want the diff to show removals against the stale config", out)
+	}
+}
+
+// TestWriteConfig_ConfirmNo_LeavesFileUntouched proves the decline path: a
+// scripted "n" writes nothing (config bytes unchanged, no playbooks), returns
+// non-zero, and says aborted.
+func TestWriteConfig_ConfirmNo_LeavesFileUntouched(t *testing.T) {
+	t.Parallel()
+
+	in := validNonInteractiveInput()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	original := []byte("tracker:\n  org: stale\n")
+	if err := os.WriteFile(configPath, original, 0o600); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	var stdout, stderr strings.Builder
+	code := writeConfig(in, configPath, bufio.NewReader(strings.NewReader("n\n")), false, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("writeConfig() code = 0, want non-zero on a declined confirmation")
+	}
+
+	after, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", configPath, err)
+	}
+	if string(after) != string(original) {
+		t.Errorf("config after confirm-no = %q, want it untouched (%q)", string(after), string(original))
+	}
+	if !strings.Contains(stdout.String(), "aborted") {
+		t.Errorf("stdout = %q, want an aborted message", stdout.String())
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(configPath), "playbooks", "dev.md")); !os.IsNotExist(err) {
+		t.Errorf("a playbook exists after a declined confirmation, want nothing written (err = %v)", err)
+	}
+}
+
+// TestWriteConfig_SkipConfirm_DoesNotReadReader proves the --yes / non-interactive
+// implication (AC-13.9): with skipConfirm the reader is never consulted, so a
+// reader scripted to decline still writes and its "n" stays buffered.
+func TestWriteConfig_SkipConfirm_DoesNotReadReader(t *testing.T) {
+	t.Parallel()
+
+	in := validNonInteractiveInput()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("tracker:\n  org: stale\n"), 0o600); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	reader := bufio.NewReader(strings.NewReader("n\n"))
+	var stdout, stderr strings.Builder
+	code := writeConfig(in, configPath, reader, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("writeConfig() code = %d, want 0 (skipConfirm ignores the reader)", code)
+	}
+
+	written, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", configPath, err)
+	}
+	if string(written) != in.render() {
+		t.Errorf("config = %q, want the rendered content (skipConfirm wrote despite the declining reader)", string(written))
+	}
+	if b, _ := reader.ReadByte(); b != 'n' {
+		t.Errorf("first buffered byte = %q, want 'n' still unread (skipConfirm must not read the reader)", b)
+	}
+	if strings.Contains(stdout.String(), "[y/N]") {
+		t.Errorf("stdout = %q, want no confirmation prompt on skipConfirm", stdout.String())
 	}
 }
