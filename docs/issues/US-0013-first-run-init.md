@@ -102,7 +102,7 @@ config-writing and token-minting stay separate commands, mirroring the `aws conf
       project match, or an unreachable git remote). Before writing, `init` validates the
       discovered token/tenant against a real ADO endpoint and refuses to write
       `config.yaml` when validation fails.
-- [ ] AC-13.2 Given a completed `init` interview, observe the written `/etc/mandat/config.yaml`
+- [x] AC-13.2 Given a completed `init` interview, observe the written `/etc/mandat/config.yaml`
       parses and passes `config.Load` unmodified, and every optional field present in the
       file (every `omitempty`-tagged key in `internal/config/config.go`) carries an adjacent
       comment that names its default value (`tracker.states.in_progress: Doing`,
@@ -110,7 +110,7 @@ config-writing and token-minting stay separate commands, mirroring the `aws conf
       `runner.pool_size * budget.max_usd_per_run` when omitted), or states "no default" with
       the omission behavior (`roles.<name>.model_tier`: no default; omitted means no
       `--model` flag is passed).
-- [ ] AC-13.3 Config-surface audit: enumerate every field `config.go`'s `validate*`
+- [x] AC-13.3 Config-surface audit: enumerate every field `config.go`'s `validate*`
       functions check, plus the two fields `applyDefaults` resolves, and place each in
       exactly one of three categories. (a) `applyDefaults`-defaulted, no operator input:
       `tracker.states.in_progress` (defaults to `Doing`), `runner.pool_size` (defaults to
@@ -119,17 +119,18 @@ config-writing and token-minting stay separate commands, mirroring the `aws conf
       `entra.identity_mode`: hardcoded to `agent-user-pair`, ADR-0005's recommended mode
       for Azure DevOps); values discovered from the operator's existing `az` session
       (`tracker.org`, `tracker.project`, `repos.<>.url`, `repos.<>.base_branch`: the AC-13.1
-      ADO chain; `entra.tenant`: the az session's tenant claim; `roles.<>.agent_identity_id`,
-      `roles.<>.agent_user_id`, `roles.<>.agent_user_name`: a registry picker over the
-      blueprint's children, the same az-session pattern AC-13.1 uses for ADO, per the
-      research doc's "registry (read surface)" table); and template-derived paths
+      ADO chain; `entra.tenant`: the az session's tenant claim); and template-derived paths
       (`roles.<>.playbook`: the path AC-13.5's embedded template is written to). (c)
       Irreducible prompts, where no discovery signal or default exists: confirming the
       discovered tracker org/project (accept or override), which discovered repo(s) to
       register plus each one's remit `paths` and `gates`, `auth.mode`, `entra.blueprint`
-      (only when US-0014's registry finds none to pick from), `roles.<>.autonomy_ceiling`,
-      and `budget.max_usd_per_run`. A field found in none of the three categories is a
-      defect in this story, not an accepted gap.
+      (phase 1 ships no registry to pick it from, so `init` always prompts it), the six
+      role-identity fields `roles.<>.agent_identity_id`, `roles.<>.agent_user_id`, and
+      `roles.<>.agent_user_name` for dev and reviewer (phase 1 prompts these; US-0014's
+      `mandat provision` registry picker over the blueprint's children, the research doc's
+      "registry (read surface)" table, moves them to category (b) once it ships),
+      `roles.<>.autonomy_ceiling`, and `budget.max_usd_per_run`. A field found in none of
+      the three categories is a defect in this story, not an accepted gap.
 - [x] AC-13.4 Given `init` writes a config with a missing irreducible field (interview
       aborted early, or a discovery step failed silently), observe `config.Load` on that
       file returns a `ValidationErrors` value whose `FieldError.Path` names the exact
@@ -160,7 +161,7 @@ config-writing and token-minting stay separate commands, mirroring the `aws conf
       sub-step of step 5, and step 7's unit-file sub-step collapse into one step that
       runs `mandat init` and answers its prompts; step 2 (Entra provisioning) is unchanged
       and stays the longest step in the document, matching this story's phase-1 scope.
-- [ ] AC-13.9 Given `mandat init --non-interactive`, observe it requires every irreducible
+- [x] AC-13.9 Given `mandat init --non-interactive`, observe it requires every irreducible
       field (tracker org/project, repo url + remit paths + gates, per-role identity
       ids/UPNs) as a flag and errors naming the specific missing flag instead of prompting.
       Given stdin is not a TTY, observe `init` behaves as if `--non-interactive` was passed,
@@ -196,6 +197,8 @@ File-disjoint allowed paths:
 - `cmd/mandat/main.go` (register the `init` subcommand)
 - `internal/config/**` (template/default-comment support only; no change to the validated
   schema itself)
+- `internal/discovery/**` (the `az`-token ADO discovery + validation engine AC-13.1 reads
+  through; a new package this story introduces)
 - `GETTING-STARTED.md`
 - `install.sh` (AC-13.14: prints the next-step message only; no config writes)
 
