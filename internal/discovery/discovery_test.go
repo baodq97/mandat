@@ -295,3 +295,79 @@ func TestNew_RejectsInvalidBaseURL(t *testing.T) {
 		t.Fatal("New() with a relative AzureDevOpsBaseURL: error = nil, want an error")
 	}
 }
+
+func TestValidateOrgAccess_Success_ReturnsNil(t *testing.T) {
+	t.Parallel()
+
+	fake := &fakeADO{projectsBody: `{"count":1,"value":[{"id":"33333333-0000-4000-8000-000000000003","name":"mandat-pilot"}]}`}
+	srv := fake.start(t)
+	c := newClient(t, srv)
+
+	if err := c.ValidateOrgAccess(context.Background(), testToken, "baodo0220"); err != nil {
+		t.Fatalf("ValidateOrgAccess() error = %v, want nil", err)
+	}
+
+	// The probe is exactly the one projects call, carrying the pinned
+	// api-version and the bearer token — never the full four-call descent.
+	reqs := fake.recorded()
+	if len(reqs) != 1 {
+		t.Fatalf("made %d requests, want 1 (the projects probe)", len(reqs))
+	}
+	if !strings.HasSuffix(reqs[0].path, "/baodo0220/_apis/projects") {
+		t.Errorf("probe path = %q, want the org's projects endpoint", reqs[0].path)
+	}
+	if !strings.Contains(reqs[0].rawQuery, "api-version="+apiVersion) {
+		t.Errorf("probe query = %q, want api-version=%s", reqs[0].rawQuery, apiVersion)
+	}
+	if reqs[0].authz != "Bearer "+testToken {
+		t.Errorf("probe authz = %q, want %q", reqs[0].authz, "Bearer "+testToken)
+	}
+}
+
+func TestValidateOrgAccess_AuthFailure_ReturnsTypedAPIError(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			t.Parallel()
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(`{"message":"the token cannot reach this organization"}`))
+			}))
+			t.Cleanup(srv.Close)
+			c := newClient(t, srv)
+
+			err := c.ValidateOrgAccess(context.Background(), testToken, "baodo0220")
+			if err == nil {
+				t.Fatalf("ValidateOrgAccess() error = nil, want a %d auth failure", status)
+			}
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("ValidateOrgAccess() error = %v, want errors.As to an *APIError", err)
+			}
+			if apiErr.Status != status {
+				t.Errorf("APIError.Status = %d, want %d", apiErr.Status, status)
+			}
+		})
+	}
+}
+
+func TestValidateOrgAccess_TransportFailure_ConnectionRefused(t *testing.T) {
+	t.Parallel()
+
+	// A closed server's URL still resolves but refuses the connection, giving a
+	// deterministic, offline transport failure distinct from any HTTP response.
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	srv.Close()
+	c := newClient(t, srv)
+
+	err := c.ValidateOrgAccess(context.Background(), testToken, "baodo0220")
+	if err == nil {
+		t.Fatal("ValidateOrgAccess() error = nil, want a transport failure")
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		t.Fatalf("ValidateOrgAccess() error = %v, want a connection-level failure, not an *APIError", err)
+	}
+}

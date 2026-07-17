@@ -231,6 +231,21 @@ func (c *Client) Discover(ctx context.Context, token string) (Result, error) {
 	return Result{Org: resolved}, nil
 }
 
+// ValidateOrgAccess probes whether token can reach org on a real Azure DevOps
+// endpoint: it GETs the org's projects list — the same call Discover makes to
+// descend into a resolved org — and returns nil on a 2xx, the typed *APIError
+// do produces on a non-2xx (an errors.As-recoverable 401/403 for an auth
+// failure), or the transport error otherwise. It is the lightweight
+// "can this token reach this org" check init runs before writing config.yaml
+// (US-0013 AC-13.1), not the full profile/accounts/projects/repos descent.
+func (c *Client) ValidateOrgAccess(ctx context.Context, token, org string) error {
+	var projects projectsResponse
+	if err := c.do(ctx, c.projectsURL(org), token, &projects); err != nil {
+		return fmt.Errorf("discovery: validate access to org %s: %w", org, err)
+	}
+	return nil
+}
+
 func (c *Client) profileURL() string {
 	u := c.vssps.JoinPath("_apis", "profile", "profiles", "me")
 	return withAPIVersion(u)

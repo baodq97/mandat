@@ -161,6 +161,12 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "mandat init: %v\n", err)
 			return 1
 		}
+		// AC-13.1's refuse gate: an az-derived token that cannot reach the chosen
+		// org fails here, before any byte lands on disk (the non-interactive path
+		// takes no az token, so it is deliberately not gated).
+		if !validateADOBeforeWrite(context.Background(), azCLITokenSource, productionOrgValidator, interviewed.trackerOrg, stderr) {
+			return 1
+		}
 		// A TTY operator still confirms the diff unless they passed --yes.
 		if code := writeConfig(interviewed, *configPath, reader, *yesFlag, stdout, stderr); code != 0 {
 			return code
@@ -928,6 +934,47 @@ func productionDiscoverer(ctx context.Context, token string) (discovery.Result, 
 		return discovery.Result{}, err
 	}
 	return c.Discover(ctx, token)
+}
+
+// orgValidator probes whether token can reach org on a real Azure DevOps
+// endpoint. It is a func field, not a hardcoded discovery call, so a test
+// supplies a fake outcome with no network call (US-0013 AC-13.1).
+type orgValidator func(ctx context.Context, token, org string) error
+
+// productionOrgValidator is the orgValidator initCmd wires up outside tests: a
+// discovery.Client built with the default (production) host config, probing the
+// org's projects endpoint through ValidateOrgAccess.
+func productionOrgValidator(ctx context.Context, token, org string) error {
+	c, err := discovery.New(discovery.Config{})
+	if err != nil {
+		return err
+	}
+	return c.ValidateOrgAccess(ctx, token, org)
+}
+
+// validateADOBeforeWrite is US-0013 AC-13.1's pre-write refuse gate: before the
+// interactive path writes config.yaml, it confirms the az-derived token can
+// actually reach the chosen org on a real Azure DevOps endpoint, and reports
+// whether init may proceed to write. Three outcomes:
+//
+//   - no token obtainable: init cannot validate, but an operator without az
+//     still configures manually, so it notes the write is unvalidated and
+//     proceeds — the refuse precondition is a token that EXISTS but fails, not
+//     a missing one.
+//   - a token that fails the probe: the token cannot reach org, so it refuses;
+//     config.yaml is not written and the caller returns non-zero.
+//   - a token that reaches org: proceed.
+func validateADOBeforeWrite(ctx context.Context, getToken tokenSource, validate orgValidator, org string, out io.Writer) bool {
+	token, err := getToken(ctx)
+	if err != nil {
+		fmt.Fprintf(out, "note: could not validate Azure DevOps access (%v); writing config.yaml unvalidated\n", err)
+		return true
+	}
+	if err := validate(ctx, token, org); err != nil {
+		fmt.Fprintf(out, "mandat init: Azure DevOps validation failed for org %s (%s); config.yaml was NOT written\n", org, discoveryFailureReason(err))
+		return false
+	}
+	return true
 }
 
 // attemptDiscovery gets a token via getToken and, on success, runs discover

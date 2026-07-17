@@ -1501,3 +1501,62 @@ func TestWriteConfig_SkipConfirm_DoesNotReadReader(t *testing.T) {
 		t.Errorf("stdout = %q, want no confirmation prompt on skipConfirm", stdout.String())
 	}
 }
+
+// TestValidateADOBeforeWrite_TokenFailsValidation_Refuses proves US-0013
+// AC-13.1's refuse clause: an obtainable token that cannot reach the org fails
+// the pre-write probe, so init must not proceed to write config.yaml — the gate
+// returns false and names both the org whose validation failed and that the
+// config was not written.
+func TestValidateADOBeforeWrite_TokenFailsValidation_Refuses(t *testing.T) {
+	t.Parallel()
+
+	failValidate := func(context.Context, string, string) error {
+		return &discovery.APIError{Status: http.StatusForbidden, Body: "no access"}
+	}
+
+	var out strings.Builder
+	if validateADOBeforeWrite(context.Background(), fakeADOTokenSource(testFakeToken), failValidate, "baodo0220", &out) {
+		t.Fatalf("validateADOBeforeWrite() = true, want false (a token that fails validation must refuse the write) (out: %s)", out.String())
+	}
+	if !strings.Contains(out.String(), "baodo0220") {
+		t.Errorf("out = %q, want it to name the org whose validation failed", out.String())
+	}
+	if !strings.Contains(out.String(), "NOT written") {
+		t.Errorf("out = %q, want it to state config.yaml was not written", out.String())
+	}
+}
+
+// TestValidateADOBeforeWrite_TokenReachesOrg_Proceeds proves the write path: an
+// obtainable token that reaches the org passes the probe, so init proceeds.
+func TestValidateADOBeforeWrite_TokenReachesOrg_Proceeds(t *testing.T) {
+	t.Parallel()
+
+	okValidate := func(context.Context, string, string) error { return nil }
+
+	var out strings.Builder
+	if !validateADOBeforeWrite(context.Background(), fakeADOTokenSource(testFakeToken), okValidate, "baodo0220", &out) {
+		t.Fatalf("validateADOBeforeWrite() = false, want true (a reachable token proceeds) (out: %s)", out.String())
+	}
+}
+
+// TestValidateADOBeforeWrite_NoToken_ProceedsUnvalidated proves the manual path:
+// with no az-derived token obtainable, init cannot validate but still lets an
+// operator configure — the gate proceeds and notes the write is unvalidated
+// (the refuse precondition is a token that EXISTS but fails, not a missing one),
+// and the validator is never consulted without a token in hand.
+func TestValidateADOBeforeWrite_NoToken_ProceedsUnvalidated(t *testing.T) {
+	t.Parallel()
+
+	unreachableValidate := func(context.Context, string, string) error {
+		t.Fatal("validate called despite a failed token source")
+		return nil
+	}
+
+	var out strings.Builder
+	if !validateADOBeforeWrite(context.Background(), failingTokenSource, unreachableValidate, "baodo0220", &out) {
+		t.Fatalf("validateADOBeforeWrite() = false, want true (no token still lets the operator configure) (out: %s)", out.String())
+	}
+	if !strings.Contains(out.String(), "unvalidated") {
+		t.Errorf("out = %q, want the unvalidated note", out.String())
+	}
+}

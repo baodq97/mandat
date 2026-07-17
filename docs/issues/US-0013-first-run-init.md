@@ -90,7 +90,7 @@ config-writing and token-minting stay separate commands, mirroring the `aws conf
 
 ## Acceptance criteria
 
-- [ ] AC-13.1 Given an operator with a working `az`-derived token for the target ADO
+- [x] AC-13.1 Given an operator with a working `az`-derived token for the target ADO
       organization, running `mandat init` discovers that org, its accessible projects, and
       their repo urls without the operator retyping them, through the pinned chain
       (`docs/research/entra-agent-id-provisioning-surface.md`, Spike round 2): an
