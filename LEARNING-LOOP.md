@@ -193,3 +193,23 @@ Format: `date | what escaped | where it should have been caught | lesson | encod
   up-to-date" - verify remote SHA == local HEAD after every push | recovered
   by saving the commit's pure-doc delta as a patch, resetting to main,
   re-applying on the real branch; this entry
+- 2026-07-17 | WI #38 (US-0013 slice 3, interactive interview) held with no
+  ResultContract, read at first as the sonnet-headless ceiling again - but
+  the stream tail proved the agent had FINISHED the code + tests (504-line
+  diff, 20KB init.go) and was killed while its own `make check` background
+  task ran, before it wrote the contract. The dev playbook step 4 told the
+  agent to "run the gate named in the task and fix until green" - the full
+  `make check` (a -race suite + govulncheck + static build, minutes) BEFORE
+  writing the ResultContract - and the verification plane re-runs every gate
+  authoritatively anyway (writer != scorer), so the agent's own full gate
+  was redundant belt-and-suspenders that ate the exact budget it needed to
+  finish | the dev playbook conflated the agent's self-check with the
+  authoritative gate: it made the runner pay minutes for a full race suite
+  the verify plane will re-run, on every run, so any near-ceiling slice dies
+  in make check with the code already done | the agent self-checks with a
+  QUICK smoke test only (`go build ./...` + the changed package's `go test`),
+  never the full `make check`; the verification plane owns the authoritative
+  gate. Defense in depth: size slices to ~250-300 lines so code + smoke +
+  contract fit one run | dev-playbook.md step 4 rewritten on the VM (this
+  arc); the paid partial was complete + green, salvaged and promoted
+  dev-side (f1e509d, author preserved); this entry
