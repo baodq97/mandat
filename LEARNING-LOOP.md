@@ -245,13 +245,13 @@ Format: `date | what escaped | where it should have been caught | lesson | encod
   here: it converts a false-premise flip into a diagnosed gap | brief drove
   real implementation of AC-13.1 (slice 12, fa63013) + AC-13.10 (slice 13,
   64c5b82); a second red-team caught an incomplete AC-13.3 fix + a live-seam
-  kill criterion; closed by a live `mandat init` against baodo0220; US-0013
+  kill criterion; closed by a live `mandat init` against contoso; US-0013
   flipped done (12a80ac); this entry
 - 2026-07-17 | Live `mandat init` surfaced that `azCLITokenSource` runs
   `az account get-access-token --resource <ADO>` WITHOUT `--tenant`, so on a
   multi-tenant operator machine it silently uses the active az tenant; the
   dogfood laptop's active tenant was the nois.vn work tenant, and baotest had
-  to be activated before the run would hit baodo0220 (the refuse-gate would
+  to be activated before the run would hit contoso (the refuse-gate would
   otherwise correctly block a wrong-tenant token) | init assumes
   active-az-session == target tenant, true on a dedicated VM but fragile on a
   multi-tenant workstation; `entra.tenant` is prompted AFTER discovery, so the

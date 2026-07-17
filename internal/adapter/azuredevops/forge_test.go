@@ -22,7 +22,7 @@ const pullRequest7 = `{
   "isDraft": true,
   "sourceRefName": "refs/heads/mandat/task-42",
   "targetRefName": "refs/heads/main",
-  "url": "https://dev.azure.com/baodo0220/mandat/_apis/git/repositories/mandat/pullRequests/7",
+  "url": "https://dev.azure.com/contoso/mandat/_apis/git/repositories/mandat/pullRequests/7",
   "createdBy": {
     "id": "8c5e2f1a-0000-4000-8000-000000000001",
     "displayName": "Dev Agent 01",
@@ -102,7 +102,7 @@ func TestCreatePR_PostsDraftPRUnderBearer(t *testing.T) {
 	if got.method != http.MethodPost {
 		t.Errorf("method = %q, want POST", got.method)
 	}
-	if !strings.HasSuffix(got.path, "/baodo0220/mandat/_apis/git/repositories/mandat/pullrequests") {
+	if !strings.HasSuffix(got.path, "/contoso/mandat/_apis/git/repositories/mandat/pullrequests") {
 		t.Errorf("path = %q, want .../git/repositories/mandat/pullrequests", got.path)
 	}
 	if !strings.Contains(got.rawQuery, "api-version="+apiVersion) {
@@ -145,8 +145,8 @@ func TestCreatePR_PostsDraftPRUnderBearer(t *testing.T) {
 	if res.ID != 7 {
 		t.Errorf("result id = %d, want 7", res.ID)
 	}
-	if !strings.HasSuffix(res.URL, "/baodo0220/mandat/_git/mandat/pullrequest/7") {
-		t.Errorf("result url = %q, want the human web URL .../baodo0220/mandat/_git/mandat/pullrequest/7", res.URL)
+	if !strings.HasSuffix(res.URL, "/contoso/mandat/_git/mandat/pullrequest/7") {
+		t.Errorf("result url = %q, want the human web URL .../contoso/mandat/_git/mandat/pullrequest/7", res.URL)
 	}
 	if strings.Contains(res.URL, "_apis") {
 		t.Errorf("result url = %q, want the human web form, not the API self-link", res.URL)

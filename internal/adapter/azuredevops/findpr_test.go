@@ -33,7 +33,7 @@ const pullRequestsListTwoActive = `{
       "isDraft": true,
       "sourceRefName": "refs/heads/mandat/task-42",
       "targetRefName": "refs/heads/main",
-      "url": "https://dev.azure.com/baodo0220/mandat/_apis/git/repositories/mandat/pullRequests/5",
+      "url": "https://dev.azure.com/contoso/mandat/_apis/git/repositories/mandat/pullRequests/5",
       "createdBy": {
         "id": "8c5e2f1a-0000-4000-8000-000000000002",
         "displayName": "Someone Else",
@@ -46,7 +46,7 @@ const pullRequestsListTwoActive = `{
       "isDraft": true,
       "sourceRefName": "refs/heads/mandat/task-42",
       "targetRefName": "refs/heads/main",
-      "url": "https://dev.azure.com/baodo0220/mandat/_apis/git/repositories/mandat/pullRequests/9",
+      "url": "https://dev.azure.com/contoso/mandat/_apis/git/repositories/mandat/pullRequests/9",
       "createdBy": {
         "id": "8c5e2f1a-0000-4000-8000-000000000001",
         "displayName": "Dev Agent 01",
@@ -72,15 +72,15 @@ func TestFindPR_MapsFoundPR(t *testing.T) {
 	if got.CreatedBy != devAgentUser {
 		t.Errorf("CreatedBy = %q, want %q", got.CreatedBy, devAgentUser)
 	}
-	if !strings.HasSuffix(got.URL, "/baodo0220/mandat/_git/mandat/pullrequest/7") {
-		t.Errorf("URL = %q, want the human web URL .../baodo0220/mandat/_git/mandat/pullrequest/7", got.URL)
+	if !strings.HasSuffix(got.URL, "/contoso/mandat/_git/mandat/pullrequest/7") {
+		t.Errorf("URL = %q, want the human web URL .../contoso/mandat/_git/mandat/pullrequest/7", got.URL)
 	}
 
 	got2 := rec.recorded(t)
 	if got2.method != http.MethodGet {
 		t.Errorf("method = %q, want GET", got2.method)
 	}
-	if !strings.HasSuffix(got2.path, "/baodo0220/mandat/_apis/git/repositories/mandat/pullrequests") {
+	if !strings.HasSuffix(got2.path, "/contoso/mandat/_apis/git/repositories/mandat/pullrequests") {
 		t.Errorf("path = %q, want .../git/repositories/mandat/pullrequests", got2.path)
 	}
 	q, err := url.ParseQuery(got2.rawQuery)

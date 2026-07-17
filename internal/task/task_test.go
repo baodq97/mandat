@@ -10,8 +10,8 @@ import (
 // below mutates exactly one field out of, so each case isolates one violation.
 func validTask() TaskContract {
 	var tc TaskContract
-	tc.ID = "ado-baodo0220-42"
-	tc.TrackerRef = TrackerRef{System: TrackerAzureDevOps, Org: "baodo0220", Project: "mandat-dogfood", WorkItemID: "42", URL: "https://dev.azure.com/baodo0220/mandat-dogfood/_workitems/edit/42"}
+	tc.ID = "ado-contoso-42"
+	tc.TrackerRef = TrackerRef{System: TrackerAzureDevOps, Org: "contoso", Project: "mandat-dogfood", WorkItemID: "42", URL: "https://dev.azure.com/contoso/mandat-dogfood/_workitems/edit/42"}
 	tc.Type = TypeDevTask
 	tc.Title = "Add the version subcommand"
 	tc.Acceptance = "mandat version prints the build version and exits 0"

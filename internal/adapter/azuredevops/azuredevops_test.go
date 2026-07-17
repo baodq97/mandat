@@ -27,7 +27,7 @@ import (
 const (
 	testToken    = "fake-delegated-agent-user-token"
 	devAgentUser = "agent-user-dev-01@baotest.onmicrosoft.com"
-	testOrg      = "baodo0220"
+	testOrg      = "contoso"
 	testProject  = "mandat"
 )
 
@@ -229,7 +229,7 @@ func registry() *config.Config {
 	return &config.Config{
 		Repos: map[string]config.RepoConfig{
 			"mandat": {
-				URL:        "https://dev.azure.com/baodo0220/mandat/_git/mandat",
+				URL:        "https://dev.azure.com/contoso/mandat/_git/mandat",
 				BaseBranch: "main",
 				Paths:      []string{"cmd/mandat/", "internal/buildinfo/"},
 			},
@@ -271,8 +271,8 @@ func TestPoll_MapsFixtureWorkItem(t *testing.T) {
 	}
 	tc := got[0]
 
-	if tc.ID != "ado-baodo0220-42" {
-		t.Errorf("ID = %q, want %q", tc.ID, "ado-baodo0220-42")
+	if tc.ID != "ado-contoso-42" {
+		t.Errorf("ID = %q, want %q", tc.ID, "ado-contoso-42")
 	}
 	if tc.TrackerRef.System != task.TrackerAzureDevOps {
 		t.Errorf("tracker_ref.system = %q, want %q", tc.TrackerRef.System, task.TrackerAzureDevOps)
@@ -283,8 +283,8 @@ func TestPoll_MapsFixtureWorkItem(t *testing.T) {
 	if tc.TrackerRef.WorkItemID != "42" {
 		t.Errorf("tracker_ref.work_item_id = %q, want %q", tc.TrackerRef.WorkItemID, "42")
 	}
-	if !strings.HasSuffix(tc.TrackerRef.URL, "/baodo0220/mandat/_workitems/edit/42") {
-		t.Errorf("tracker_ref.url = %q, want the human edit URL ending /baodo0220/mandat/_workitems/edit/42", tc.TrackerRef.URL)
+	if !strings.HasSuffix(tc.TrackerRef.URL, "/contoso/mandat/_workitems/edit/42") {
+		t.Errorf("tracker_ref.url = %q, want the human edit URL ending /contoso/mandat/_workitems/edit/42", tc.TrackerRef.URL)
 	}
 	if tc.Type != task.TypeDevTask {
 		t.Errorf("type = %q, want %q", tc.Type, task.TypeDevTask)
@@ -412,8 +412,8 @@ func TestPoll_SkipsRepoAbsentAndUnassigned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Poll() error = %v, want nil", err)
 	}
-	if len(got) != 1 || got[0].ID != "ado-baodo0220-42" {
-		t.Fatalf("Poll() = %+v, want only the in-registry, assigned item ado-baodo0220-42", got)
+	if len(got) != 1 || got[0].ID != "ado-contoso-42" {
+		t.Fatalf("Poll() = %+v, want only the in-registry, assigned item ado-contoso-42", got)
 	}
 
 	logs := logBuf.String()
@@ -471,7 +471,7 @@ func TestComment_IssuesPreviewPostWithTextBody(t *testing.T) {
 	if r.method != http.MethodPost {
 		t.Errorf("method = %q, want POST", r.method)
 	}
-	if !strings.HasSuffix(r.path, "/baodo0220/mandat/_apis/wit/workitems/42/comments") {
+	if !strings.HasSuffix(r.path, "/contoso/mandat/_apis/wit/workitems/42/comments") {
 		t.Errorf("path = %q, want .../workitems/42/comments", r.path)
 	}
 	if !strings.Contains(r.rawQuery, "api-version="+commentsAPIVersion) {
@@ -511,7 +511,7 @@ func TestApplyStatus_IssuesJSONPatchStateUpdate(t *testing.T) {
 	if r.method != http.MethodPatch {
 		t.Errorf("method = %q, want PATCH", r.method)
 	}
-	if !strings.HasSuffix(r.path, "/baodo0220/mandat/_apis/wit/workitems/42") {
+	if !strings.HasSuffix(r.path, "/contoso/mandat/_apis/wit/workitems/42") {
 		t.Errorf("path = %q, want .../workitems/42", r.path)
 	}
 	if !strings.Contains(r.rawQuery, "api-version="+apiVersion) {

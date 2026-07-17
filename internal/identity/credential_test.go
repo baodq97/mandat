@@ -23,7 +23,7 @@ func (f *fakeSource) Token(_ context.Context, _ string) (string, error) {
 	return f.token, f.err
 }
 
-const getRequest = "protocol=https\nhost=dev.azure.com\npath=baodo0220/mandat-dogfood/_git/mandat\n\n"
+const getRequest = "protocol=https\nhost=dev.azure.com\npath=contoso/mandat-dogfood/_git/mandat\n\n"
 
 func TestCredentialHelper_Get(t *testing.T) {
 	t.Parallel()

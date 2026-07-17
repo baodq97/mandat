@@ -93,9 +93,9 @@ func TestDiscover_Success(t *testing.T) {
 
 	fake := &fakeADO{
 		profileBody:  `{"id":"11111111-0000-4000-8000-000000000001"}`,
-		accountsBody: `{"count":1,"value":[{"accountId":"22222222-0000-4000-8000-000000000002","accountName":"baodo0220"}]}`,
+		accountsBody: `{"count":1,"value":[{"accountId":"22222222-0000-4000-8000-000000000002","accountName":"contoso"}]}`,
 		projectsBody: `{"count":1,"value":[{"id":"33333333-0000-4000-8000-000000000003","name":"mandat-pilot"}]}`,
-		reposBody:    `{"count":1,"value":[{"id":"44444444-0000-4000-8000-000000000004","name":"mandat","remoteUrl":"https://dev.azure.com/baodo0220/mandat-pilot/_git/mandat"}]}`,
+		reposBody:    `{"count":1,"value":[{"id":"44444444-0000-4000-8000-000000000004","name":"mandat","remoteUrl":"https://dev.azure.com/contoso/mandat-pilot/_git/mandat"}]}`,
 	}
 	srv := fake.start(t)
 	c := newClient(t, srv)
@@ -105,8 +105,8 @@ func TestDiscover_Success(t *testing.T) {
 		t.Fatalf("Discover() error = %v, want nil", err)
 	}
 
-	if got.Org.Name != "baodo0220" {
-		t.Errorf("Org.Name = %q, want %q", got.Org.Name, "baodo0220")
+	if got.Org.Name != "contoso" {
+		t.Errorf("Org.Name = %q, want %q", got.Org.Name, "contoso")
 	}
 	if got.Org.ID != "22222222-0000-4000-8000-000000000002" {
 		t.Errorf("Org.ID = %q, want the accountId", got.Org.ID)
@@ -118,7 +118,7 @@ func TestDiscover_Success(t *testing.T) {
 	if len(repos) != 1 || repos[0].Name != "mandat" {
 		t.Fatalf("Repositories = %+v, want one repo named mandat", repos)
 	}
-	if repos[0].RemoteURL != "https://dev.azure.com/baodo0220/mandat-pilot/_git/mandat" {
+	if repos[0].RemoteURL != "https://dev.azure.com/contoso/mandat-pilot/_git/mandat" {
 		t.Errorf("RemoteURL = %q, want the fixture remoteUrl", repos[0].RemoteURL)
 	}
 
@@ -145,10 +145,10 @@ func TestDiscover_Success(t *testing.T) {
 	if !strings.HasSuffix(reqs[1].path, "/_apis/accounts") || !strings.Contains(reqs[1].rawQuery, "memberId=11111111-0000-4000-8000-000000000001") {
 		t.Errorf("second call = %q?%q, want the accounts endpoint carrying the profile's member id", reqs[1].path, reqs[1].rawQuery)
 	}
-	if !strings.HasSuffix(reqs[2].path, "/baodo0220/_apis/projects") {
+	if !strings.HasSuffix(reqs[2].path, "/contoso/_apis/projects") {
 		t.Errorf("third call path = %q, want the org's projects endpoint", reqs[2].path)
 	}
-	if !strings.HasSuffix(reqs[3].path, "/baodo0220/mandat-pilot/_apis/git/repositories") {
+	if !strings.HasSuffix(reqs[3].path, "/contoso/mandat-pilot/_apis/git/repositories") {
 		t.Errorf("fourth call path = %q, want the project's repositories endpoint", reqs[3].path)
 	}
 }
@@ -180,7 +180,7 @@ func TestDiscover_MultipleAccounts_ReturnsAmbiguousOrgError(t *testing.T) {
 	fake := &fakeADO{
 		profileBody: `{"id":"11111111-0000-4000-8000-000000000001"}`,
 		accountsBody: `{"count":2,"value":[
-			{"accountId":"aaaaaaaa-0000-4000-8000-000000000001","accountName":"baodo0220"},
+			{"accountId":"aaaaaaaa-0000-4000-8000-000000000001","accountName":"contoso"},
 			{"accountId":"bbbbbbbb-0000-4000-8000-000000000002","accountName":"other-org"}
 		]}`,
 	}
@@ -195,7 +195,7 @@ func TestDiscover_MultipleAccounts_ReturnsAmbiguousOrgError(t *testing.T) {
 	if !errors.As(err, &ambErr) {
 		t.Fatalf("Discover() error = %v, want errors.As to an *AmbiguousOrgError", err)
 	}
-	want := []string{"baodo0220", "other-org"}
+	want := []string{"contoso", "other-org"}
 	if len(ambErr.Orgs) != len(want) || ambErr.Orgs[0] != want[0] || ambErr.Orgs[1] != want[1] {
 		t.Errorf("AmbiguousOrgError.Orgs = %v, want %v", ambErr.Orgs, want)
 	}
@@ -303,7 +303,7 @@ func TestValidateOrgAccess_Success_ReturnsNil(t *testing.T) {
 	srv := fake.start(t)
 	c := newClient(t, srv)
 
-	if err := c.ValidateOrgAccess(context.Background(), testToken, "baodo0220"); err != nil {
+	if err := c.ValidateOrgAccess(context.Background(), testToken, "contoso"); err != nil {
 		t.Fatalf("ValidateOrgAccess() error = %v, want nil", err)
 	}
 
@@ -313,7 +313,7 @@ func TestValidateOrgAccess_Success_ReturnsNil(t *testing.T) {
 	if len(reqs) != 1 {
 		t.Fatalf("made %d requests, want 1 (the projects probe)", len(reqs))
 	}
-	if !strings.HasSuffix(reqs[0].path, "/baodo0220/_apis/projects") {
+	if !strings.HasSuffix(reqs[0].path, "/contoso/_apis/projects") {
 		t.Errorf("probe path = %q, want the org's projects endpoint", reqs[0].path)
 	}
 	if !strings.Contains(reqs[0].rawQuery, "api-version="+apiVersion) {
@@ -338,7 +338,7 @@ func TestValidateOrgAccess_AuthFailure_ReturnsTypedAPIError(t *testing.T) {
 			t.Cleanup(srv.Close)
 			c := newClient(t, srv)
 
-			err := c.ValidateOrgAccess(context.Background(), testToken, "baodo0220")
+			err := c.ValidateOrgAccess(context.Background(), testToken, "contoso")
 			if err == nil {
 				t.Fatalf("ValidateOrgAccess() error = nil, want a %d auth failure", status)
 			}
@@ -362,7 +362,7 @@ func TestValidateOrgAccess_TransportFailure_ConnectionRefused(t *testing.T) {
 	srv.Close()
 	c := newClient(t, srv)
 
-	err := c.ValidateOrgAccess(context.Background(), testToken, "baodo0220")
+	err := c.ValidateOrgAccess(context.Background(), testToken, "contoso")
 	if err == nil {
 		t.Fatal("ValidateOrgAccess() error = nil, want a transport failure")
 	}

@@ -21,8 +21,8 @@ import (
 const (
 	devUser      = "agent-user-dev-01@baotest.onmicrosoft.com"
 	reviewerUser = "agent-user-reviewer-01@baotest.onmicrosoft.com"
-	taskID       = "ado-baodo0220-42"
-	branch       = "mandat/ado-baodo0220-42"
+	taskID       = "ado-contoso-42"
+	branch       = "mandat/ado-contoso-42"
 	repo         = "mandat"
 )
 
@@ -146,7 +146,7 @@ func TestVerify_ResultOK_AllThreeChecksPass(t *testing.T) {
 	dir := t.TempDir()
 	gate := gateScript(t, dir, 0)
 	remit := &fakeRemit{}
-	probe := &fakeProbe{identity: reviewerUser, info: PRInfo{Exists: true, CreatedBy: devUser, URL: "https://dev.azure.com/baodo0220/mandat/_git/mandat/pullrequest/7"}}
+	probe := &fakeProbe{identity: reviewerUser, info: PRInfo{Exists: true, CreatedBy: devUser, URL: "https://dev.azure.com/contoso/mandat/_git/mandat/pullrequest/7"}}
 
 	got, err := New(probe).Verify(context.Background(), request(dir, []string{gate}, remit, &fakeAncestry{}))
 	if err != nil {
@@ -458,7 +458,7 @@ func TestVerify_IgnoresResultContractSelfReport(t *testing.T) {
 
 		dir := t.TempDir()
 		// The agent claims it failed, yet every ground-truth check is green.
-		plantResult(t, dir, `{"schema_version":1,"task_id":"ado-baodo0220-42","status":"failed","reason":"agent self-reports failure"}`)
+		plantResult(t, dir, `{"schema_version":1,"task_id":"ado-contoso-42","status":"failed","reason":"agent self-reports failure"}`)
 		gate := gateScript(t, dir, 0)
 		remit := &fakeRemit{}
 		probe := &fakeProbe{identity: reviewerUser, info: PRInfo{Exists: true, CreatedBy: devUser}}
@@ -477,7 +477,7 @@ func TestVerify_IgnoresResultContractSelfReport(t *testing.T) {
 
 		dir := t.TempDir()
 		// The agent claims a completed run with an opened PR, yet the gate is red.
-		plantResult(t, dir, `{"schema_version":1,"task_id":"ado-baodo0220-42","status":"completed","artifacts":[{"repo":"mandat","branch":"mandat/ado-baodo0220-42","pr_url":"https://dev.azure.com/baodo0220/mandat/_git/mandat/pullrequest/7"}]}`)
+		plantResult(t, dir, `{"schema_version":1,"task_id":"ado-contoso-42","status":"completed","artifacts":[{"repo":"mandat","branch":"mandat/ado-contoso-42","pr_url":"https://dev.azure.com/contoso/mandat/_git/mandat/pullrequest/7"}]}`)
 		gate := gateScript(t, dir, 1)
 		remit := &fakeRemit{}
 		probe := &fakeProbe{identity: reviewerUser, info: PRInfo{Exists: true, CreatedBy: devUser}}

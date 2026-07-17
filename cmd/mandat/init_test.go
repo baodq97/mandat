@@ -26,12 +26,12 @@ func validInitArgs(configPath string) []string {
 	return []string{
 		"--non-interactive",
 		"--config", configPath,
-		"--tracker-org", "baodo0220",
+		"--tracker-org", "contoso",
 		"--tracker-project", "mandat-dogfood",
 		"--auth-mode", "arc-managed-identity",
-		"--entra-tenant", "d1a7b725-aaaa-bbbb-cccc-dddddddddddd",
+		"--entra-tenant", "11111111-1111-1111-1111-111111111111",
 		"--entra-blueprint", "blueprint-01",
-		"--repo", "mandat=https://dev.azure.com/baodo0220/mandat-dogfood/_git/mandat",
+		"--repo", "mandat=https://dev.azure.com/contoso/mandat-dogfood/_git/mandat",
 		"--base-branch", "main",
 		"--remit-path", "internal/",
 		"--remit-path", "cmd/",
@@ -39,10 +39,10 @@ func validInitArgs(configPath string) []string {
 		"--gate", "npx govkit check",
 		"--dev-identity-id", "agent-identity-dev-01",
 		"--dev-user-id", "agent-user-dev-01",
-		"--dev-user-upn", "dev-agent@baodo0220.onmicrosoft.com",
+		"--dev-user-upn", "dev-agent@contoso.onmicrosoft.com",
 		"--reviewer-identity-id", "agent-identity-reviewer-01",
 		"--reviewer-user-id", "agent-user-reviewer-01",
-		"--reviewer-user-upn", "reviewer-agent@baodo0220.onmicrosoft.com",
+		"--reviewer-user-upn", "reviewer-agent@contoso.onmicrosoft.com",
 		"--autonomy-ceiling", "draft-pr",
 		"--max-usd-per-run", "5",
 	}
@@ -129,7 +129,7 @@ func TestInitCmd_NonInteractive_HappyPathEmitAndReload(t *testing.T) {
 	if cfg.Tracker.Kind != config.TrackerAzureDevOps {
 		t.Errorf("Tracker.Kind = %q, want %q (constant, no flag)", cfg.Tracker.Kind, config.TrackerAzureDevOps)
 	}
-	if cfg.Tracker.Org != "baodo0220" || cfg.Tracker.Project != "mandat-dogfood" {
+	if cfg.Tracker.Org != "contoso" || cfg.Tracker.Project != "mandat-dogfood" {
 		t.Errorf("Tracker = %+v, want org/project from flags", cfg.Tracker)
 	}
 	if cfg.Tracker.States.InProgress != config.DefaultInProgressState {
@@ -141,7 +141,7 @@ func TestInitCmd_NonInteractive_HappyPathEmitAndReload(t *testing.T) {
 	if cfg.Entra.IdentityMode != config.IdentityAgentUserPair {
 		t.Errorf("Entra.IdentityMode = %q, want %q (constant, no flag)", cfg.Entra.IdentityMode, config.IdentityAgentUserPair)
 	}
-	if cfg.Entra.Tenant != "d1a7b725-aaaa-bbbb-cccc-dddddddddddd" || cfg.Entra.Blueprint != "blueprint-01" {
+	if cfg.Entra.Tenant != "11111111-1111-1111-1111-111111111111" || cfg.Entra.Blueprint != "blueprint-01" {
 		t.Errorf("Entra = %+v, want tenant/blueprint from flags", cfg.Entra)
 	}
 
@@ -149,7 +149,7 @@ func TestInitCmd_NonInteractive_HappyPathEmitAndReload(t *testing.T) {
 	if !ok {
 		t.Fatalf("Repos = %+v, want a %q entry", cfg.Repos, "mandat")
 	}
-	if repo.URL != "https://dev.azure.com/baodo0220/mandat-dogfood/_git/mandat" || repo.BaseBranch != "main" {
+	if repo.URL != "https://dev.azure.com/contoso/mandat-dogfood/_git/mandat" || repo.BaseBranch != "main" {
 		t.Errorf("Repos[mandat] = %+v, want url/base_branch from flags", repo)
 	}
 	if got, want := repo.Paths, []string{"internal/", "cmd/"}; !slices.Equal(got, want) {
@@ -163,7 +163,7 @@ func TestInitCmd_NonInteractive_HappyPathEmitAndReload(t *testing.T) {
 	if !ok {
 		t.Fatalf("Roles = %+v, want a dev entry", cfg.Roles)
 	}
-	if dev.AgentIdentityID != "agent-identity-dev-01" || dev.AgentUserID != "agent-user-dev-01" || dev.AgentUserName != "dev-agent@baodo0220.onmicrosoft.com" {
+	if dev.AgentIdentityID != "agent-identity-dev-01" || dev.AgentUserID != "agent-user-dev-01" || dev.AgentUserName != "dev-agent@contoso.onmicrosoft.com" {
 		t.Errorf("Roles[dev] identity = %+v, want the dev flags", dev)
 	}
 	if dev.AutonomyCeiling != config.CeilingDraftPR {
@@ -180,7 +180,7 @@ func TestInitCmd_NonInteractive_HappyPathEmitAndReload(t *testing.T) {
 	if !ok {
 		t.Fatalf("Roles = %+v, want a reviewer entry", cfg.Roles)
 	}
-	if reviewer.AgentIdentityID != "agent-identity-reviewer-01" || reviewer.AgentUserName != "reviewer-agent@baodo0220.onmicrosoft.com" {
+	if reviewer.AgentIdentityID != "agent-identity-reviewer-01" || reviewer.AgentUserName != "reviewer-agent@contoso.onmicrosoft.com" {
 		t.Errorf("Roles[reviewer] identity = %+v, want the reviewer flags", reviewer)
 	}
 	if reviewer.AutonomyCeiling != config.CeilingReport {
@@ -466,7 +466,7 @@ func TestConfigLoad_MissingRoleUPN_YieldsDottedFieldError(t *testing.T) {
 	// renderRole (init.go) writes this exact line for the dev role's UPN
 	// (validInitArgs' --dev-user-upn); blank its value to simulate init
 	// writing the role block with the UPN omitted.
-	devUPNLine := "    agent_user_name: dev-agent@baodo0220.onmicrosoft.com\n"
+	devUPNLine := "    agent_user_name: dev-agent@contoso.onmicrosoft.com\n"
 	blanked := strings.Replace(string(full), devUPNLine, "    agent_user_name:\n", 1)
 	if blanked == string(full) {
 		t.Fatal("rendered config has no dev agent_user_name line to blank")
@@ -557,14 +557,14 @@ func TestInitCmd_RenderedComments_CoverEveryOmitemptyField(t *testing.T) {
 // sync with runInteractiveInterview's prompt order.
 func validInteractiveScriptLines() []string {
 	return []string{
-		"baodo0220",      // tracker.org
+		"contoso",        // tracker.org
 		"mandat-dogfood", // tracker.project
 		"",               // tracker.states.in_progress [Doing]
 		"arc-managed-identity",
-		"d1a7b725-aaaa-bbbb-cccc-dddddddddddd",
+		"11111111-1111-1111-1111-111111111111",
 		"blueprint-01",
 		"mandat", // repo key
-		"https://dev.azure.com/baodo0220/mandat-dogfood/_git/mandat",
+		"https://dev.azure.com/contoso/mandat-dogfood/_git/mandat",
 		"main", // base_branch
 		"internal/",
 		"cmd/",
@@ -574,10 +574,10 @@ func validInteractiveScriptLines() []string {
 		"", // end gates
 		"agent-identity-dev-01",
 		"agent-user-dev-01",
-		"dev-agent@baodo0220.onmicrosoft.com",
+		"dev-agent@contoso.onmicrosoft.com",
 		"agent-identity-reviewer-01",
 		"agent-user-reviewer-01",
-		"reviewer-agent@baodo0220.onmicrosoft.com",
+		"reviewer-agent@contoso.onmicrosoft.com",
 		"draft-pr",
 		"",  // runner.pool_size [1]
 		"5", // budget.max_usd_per_run
@@ -630,7 +630,7 @@ func TestRunInteractiveInterview_HappyPath_EmitAndReload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.Load(%q) error = %v, want nil", configPath, err)
 	}
-	if cfg.Tracker.Org != "baodo0220" || cfg.Tracker.Project != "mandat-dogfood" {
+	if cfg.Tracker.Org != "contoso" || cfg.Tracker.Project != "mandat-dogfood" {
 		t.Errorf("Tracker = %+v, want org/project from the interview", cfg.Tracker)
 	}
 	if cfg.Tracker.States.InProgress != config.DefaultInProgressState {
@@ -639,7 +639,7 @@ func TestRunInteractiveInterview_HappyPath_EmitAndReload(t *testing.T) {
 	if cfg.Auth.Mode != config.AuthArcManagedIdentity {
 		t.Errorf("Auth.Mode = %q, want arc-managed-identity", cfg.Auth.Mode)
 	}
-	if cfg.Entra.Tenant != "d1a7b725-aaaa-bbbb-cccc-dddddddddddd" || cfg.Entra.Blueprint != "blueprint-01" {
+	if cfg.Entra.Tenant != "11111111-1111-1111-1111-111111111111" || cfg.Entra.Blueprint != "blueprint-01" {
 		t.Errorf("Entra = %+v, want tenant/blueprint from the interview", cfg.Entra)
 	}
 
@@ -647,7 +647,7 @@ func TestRunInteractiveInterview_HappyPath_EmitAndReload(t *testing.T) {
 	if !ok {
 		t.Fatalf("Repos = %+v, want a %q entry", cfg.Repos, "mandat")
 	}
-	if repo.URL != "https://dev.azure.com/baodo0220/mandat-dogfood/_git/mandat" || repo.BaseBranch != "main" {
+	if repo.URL != "https://dev.azure.com/contoso/mandat-dogfood/_git/mandat" || repo.BaseBranch != "main" {
 		t.Errorf("Repos[mandat] = %+v, want url/base_branch from the interview", repo)
 	}
 	if got, want := repo.Paths, []string{"internal/", "cmd/"}; !slices.Equal(got, want) {
@@ -661,7 +661,7 @@ func TestRunInteractiveInterview_HappyPath_EmitAndReload(t *testing.T) {
 	if !ok {
 		t.Fatalf("Roles = %+v, want a dev entry", cfg.Roles)
 	}
-	if dev.AgentIdentityID != "agent-identity-dev-01" || dev.AgentUserName != "dev-agent@baodo0220.onmicrosoft.com" {
+	if dev.AgentIdentityID != "agent-identity-dev-01" || dev.AgentUserName != "dev-agent@contoso.onmicrosoft.com" {
 		t.Errorf("Roles[dev] identity = %+v, want the interview's dev answers", dev)
 	}
 	if dev.AutonomyCeiling != config.CeilingDraftPR {
@@ -698,8 +698,8 @@ func TestRunInteractiveInterview_EmptyRequiredField_RePrompts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
 	}
-	if in.trackerOrg != "baodo0220" {
-		t.Errorf("trackerOrg = %q, want %q (the value given after the re-prompt)", in.trackerOrg, "baodo0220")
+	if in.trackerOrg != "contoso" {
+		t.Errorf("trackerOrg = %q, want %q (the value given after the re-prompt)", in.trackerOrg, "contoso")
 	}
 	if !strings.Contains(transcript.String(), "try again") {
 		t.Errorf("transcript = %q, want a re-prompt message after the blank tracker.org answer", transcript.String())
@@ -950,9 +950,9 @@ func TestRunInteractiveInterview_DiscoverySuccess_ConfirmProducesLoadableConfig(
 
 	srv := fakeADOServer(t,
 		`{"id":"11111111-0000-4000-8000-000000000001"}`,
-		`{"count":1,"value":[{"accountId":"22222222-0000-4000-8000-000000000002","accountName":"baodo0220"}]}`,
+		`{"count":1,"value":[{"accountId":"22222222-0000-4000-8000-000000000002","accountName":"contoso"}]}`,
 		`{"count":1,"value":[{"id":"33333333-0000-4000-8000-000000000003","name":"mandat-pilot"}]}`,
-		`{"count":1,"value":[{"id":"44444444-0000-4000-8000-000000000004","name":"mandat","remoteUrl":"https://dev.azure.com/baodo0220/mandat-pilot/_git/mandat"}]}`,
+		`{"count":1,"value":[{"id":"44444444-0000-4000-8000-000000000004","name":"mandat","remoteUrl":"https://dev.azure.com/contoso/mandat-pilot/_git/mandat"}]}`,
 	)
 
 	lines := validInteractiveScriptLines()
@@ -968,13 +968,13 @@ func TestRunInteractiveInterview_DiscoverySuccess_ConfirmProducesLoadableConfig(
 	if err := in.validate(); err != nil {
 		t.Fatalf("in.validate() error = %v, want nil (transcript: %s)", err, transcript.String())
 	}
-	if in.trackerOrg != "baodo0220" {
-		t.Errorf("trackerOrg = %q, want the discovered org %q", in.trackerOrg, "baodo0220")
+	if in.trackerOrg != "contoso" {
+		t.Errorf("trackerOrg = %q, want the discovered org %q", in.trackerOrg, "contoso")
 	}
 	if in.trackerProject != "mandat-pilot" {
 		t.Errorf("trackerProject = %q, want the discovered project %q", in.trackerProject, "mandat-pilot")
 	}
-	if in.repoURL != "https://dev.azure.com/baodo0220/mandat-pilot/_git/mandat" {
+	if in.repoURL != "https://dev.azure.com/contoso/mandat-pilot/_git/mandat" {
 		t.Errorf("repoURL = %q, want the discovered remote url", in.repoURL)
 	}
 
@@ -987,11 +987,11 @@ func TestRunInteractiveInterview_DiscoverySuccess_ConfirmProducesLoadableConfig(
 	if err != nil {
 		t.Fatalf("config.Load(%q) error = %v, want nil", configPath, err)
 	}
-	if cfg.Tracker.Org != "baodo0220" || cfg.Tracker.Project != "mandat-pilot" {
+	if cfg.Tracker.Org != "contoso" || cfg.Tracker.Project != "mandat-pilot" {
 		t.Errorf("Tracker = %+v, want the confirmed discovered org/project", cfg.Tracker)
 	}
 	repo, ok := cfg.Repos["mandat"]
-	if !ok || repo.URL != "https://dev.azure.com/baodo0220/mandat-pilot/_git/mandat" {
+	if !ok || repo.URL != "https://dev.azure.com/contoso/mandat-pilot/_git/mandat" {
 		t.Errorf("Repos[mandat] = %+v, want the confirmed discovered remote url", cfg.Repos)
 	}
 }
@@ -1010,7 +1010,7 @@ func TestRunInteractiveInterview_AmbiguousOrg_FallsBackToPrompting(t *testing.T)
 	srv := fakeADOServer(t,
 		`{"id":"11111111-0000-4000-8000-000000000001"}`,
 		`{"count":2,"value":[
-			{"accountId":"aaaaaaaa-0000-4000-8000-000000000001","accountName":"baodo0220"},
+			{"accountId":"aaaaaaaa-0000-4000-8000-000000000001","accountName":"contoso"},
 			{"accountId":"bbbbbbbb-0000-4000-8000-000000000002","accountName":"other-org"}
 		]}`,
 		"", "",
@@ -1024,8 +1024,8 @@ func TestRunInteractiveInterview_AmbiguousOrg_FallsBackToPrompting(t *testing.T)
 	if !strings.Contains(transcript.String(), "note:") || !strings.Contains(transcript.String(), "more than one organization") {
 		t.Errorf("transcript = %q, want a one-line note naming the ambiguous-org failure", transcript.String())
 	}
-	if in.trackerOrg != "baodo0220" {
-		t.Errorf("trackerOrg = %q, want the manually typed %q", in.trackerOrg, "baodo0220")
+	if in.trackerOrg != "contoso" {
+		t.Errorf("trackerOrg = %q, want the manually typed %q", in.trackerOrg, "contoso")
 	}
 
 	if err := in.validate(); err != nil {
@@ -1055,7 +1055,7 @@ func TestRunInteractiveInterview_TokenSourceFailure_FallsBackToPrompting(t *test
 	if !strings.Contains(transcript.String(), "note:") {
 		t.Errorf("transcript = %q, want a one-line note about the token source failure", transcript.String())
 	}
-	if in.trackerOrg != "baodo0220" || in.trackerProject != "mandat-dogfood" {
+	if in.trackerOrg != "contoso" || in.trackerProject != "mandat-dogfood" {
 		t.Errorf("in = %+v, want the manually typed org/project from the fallback prompts", in)
 	}
 
@@ -1239,8 +1239,8 @@ func TestFinishInit_AllPass_PrintsTableAndHandoff(t *testing.T) {
 		"CHECK", "STATUS", "DETAIL",
 		"synthetic", "PASS",
 		"mandat serve",
-		"dev-agent@baodo0220.onmicrosoft.com",
-		"reviewer-agent@baodo0220.onmicrosoft.com",
+		"dev-agent@contoso.onmicrosoft.com",
+		"reviewer-agent@contoso.onmicrosoft.com",
 		"internal/",
 	}
 	for _, sub := range want {
@@ -1272,7 +1272,7 @@ func TestFinishInit_RequiredCheckFails_NonZeroButStillPrintsHandoff(t *testing.T
 	if !strings.Contains(out, "FAIL") {
 		t.Errorf("finishInit stdout has no FAIL row for the failing required check\n%s", out)
 	}
-	if !strings.Contains(out, "mandat serve") || !strings.Contains(out, "dev-agent@baodo0220.onmicrosoft.com") {
+	if !strings.Contains(out, "mandat serve") || !strings.Contains(out, "dev-agent@contoso.onmicrosoft.com") {
 		t.Errorf("finishInit did not print the handoff after a failing check\n%s", out)
 	}
 }
@@ -1297,23 +1297,23 @@ func TestFinishInit_ConfigLoadError_ReturnsOne(t *testing.T) {
 // whole interview or flag parse.
 func validNonInteractiveInput() nonInteractiveInput {
 	return nonInteractiveInput{
-		trackerOrg:         "baodo0220",
+		trackerOrg:         "contoso",
 		trackerProject:     "mandat-dogfood",
 		authMode:           string(config.AuthArcManagedIdentity),
-		entraTenant:        "d1a7b725-aaaa-bbbb-cccc-dddddddddddd",
+		entraTenant:        "11111111-1111-1111-1111-111111111111",
 		entraBlueprint:     "blueprint-01",
-		repoRaw:            "mandat=https://dev.azure.com/baodo0220/mandat-dogfood/_git/mandat",
+		repoRaw:            "mandat=https://dev.azure.com/contoso/mandat-dogfood/_git/mandat",
 		repoKey:            "mandat",
-		repoURL:            "https://dev.azure.com/baodo0220/mandat-dogfood/_git/mandat",
+		repoURL:            "https://dev.azure.com/contoso/mandat-dogfood/_git/mandat",
 		baseBranch:         "main",
 		remitPaths:         []string{"internal/", "cmd/"},
 		gates:              []string{"make check", "npx govkit check"},
 		devIdentityID:      "agent-identity-dev-01",
 		devUserID:          "agent-user-dev-01",
-		devUserUPN:         "dev-agent@baodo0220.onmicrosoft.com",
+		devUserUPN:         "dev-agent@contoso.onmicrosoft.com",
 		reviewerIdentityID: "agent-identity-reviewer-01",
 		reviewerUserID:     "agent-user-reviewer-01",
-		reviewerUserUPN:    "reviewer-agent@baodo0220.onmicrosoft.com",
+		reviewerUserUPN:    "reviewer-agent@contoso.onmicrosoft.com",
 		autonomyCeiling:    string(config.CeilingDraftPR),
 		maxUSDPerRun:       5,
 	}
@@ -1359,7 +1359,7 @@ func TestRenderConfigDiff_Identical_AllContext(t *testing.T) {
 func TestRenderConfigDiff_SingleChangedLine(t *testing.T) {
 	t.Parallel()
 
-	old := "tracker:\n  org: baodo0220\n  project: mandat\n"
+	old := "tracker:\n  org: contoso\n  project: mandat\n"
 	updated := "tracker:\n  org: rebranded\n  project: mandat\n"
 	diff := renderConfigDiff(old, updated)
 
@@ -1374,7 +1374,7 @@ func TestRenderConfigDiff_SingleChangedLine(t *testing.T) {
 			context = append(context, strings.TrimPrefix(line, "  "))
 		}
 	}
-	if want := []string{"  org: baodo0220"}; !slices.Equal(removed, want) {
+	if want := []string{"  org: contoso"}; !slices.Equal(removed, want) {
 		t.Errorf("removed = %q, want exactly the changed old line %q", removed, want)
 	}
 	if want := []string{"  org: rebranded"}; !slices.Equal(added, want) {
@@ -1528,10 +1528,10 @@ func TestValidateADOBeforeWrite_TokenFailsValidation_Refuses(t *testing.T) {
 	}
 
 	var out strings.Builder
-	if validateADOBeforeWrite(context.Background(), fakeADOTokenSource(testFakeToken), failValidate, "baodo0220", &out) {
+	if validateADOBeforeWrite(context.Background(), fakeADOTokenSource(testFakeToken), failValidate, "contoso", &out) {
 		t.Fatalf("validateADOBeforeWrite() = true, want false (a token that fails validation must refuse the write) (out: %s)", out.String())
 	}
-	if !strings.Contains(out.String(), "baodo0220") {
+	if !strings.Contains(out.String(), "contoso") {
 		t.Errorf("out = %q, want it to name the org whose validation failed", out.String())
 	}
 	if !strings.Contains(out.String(), "NOT written") {
@@ -1547,7 +1547,7 @@ func TestValidateADOBeforeWrite_TokenReachesOrg_Proceeds(t *testing.T) {
 	okValidate := func(context.Context, string, string) error { return nil }
 
 	var out strings.Builder
-	if !validateADOBeforeWrite(context.Background(), fakeADOTokenSource(testFakeToken), okValidate, "baodo0220", &out) {
+	if !validateADOBeforeWrite(context.Background(), fakeADOTokenSource(testFakeToken), okValidate, "contoso", &out) {
 		t.Fatalf("validateADOBeforeWrite() = false, want true (a reachable token proceeds) (out: %s)", out.String())
 	}
 }
@@ -1566,7 +1566,7 @@ func TestValidateADOBeforeWrite_NoToken_ProceedsUnvalidated(t *testing.T) {
 	}
 
 	var out strings.Builder
-	if !validateADOBeforeWrite(context.Background(), failingTokenSource, unreachableValidate, "baodo0220", &out) {
+	if !validateADOBeforeWrite(context.Background(), failingTokenSource, unreachableValidate, "contoso", &out) {
 		t.Fatalf("validateADOBeforeWrite() = false, want true (no token still lets the operator configure) (out: %s)", out.String())
 	}
 	if !strings.Contains(out.String(), "unvalidated") {
@@ -1592,8 +1592,8 @@ func TestInitCmd_NonInteractive_FlagBeatsEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.Load(%q) error = %v, want nil", configPath, err)
 	}
-	if cfg.Tracker.Org != "baodo0220" {
-		t.Errorf("Tracker.Org = %q, want the flag value %q (flags > env, not the env %q)", cfg.Tracker.Org, "baodo0220", "envorg")
+	if cfg.Tracker.Org != "contoso" {
+		t.Errorf("Tracker.Org = %q, want the flag value %q (flags > env, not the env %q)", cfg.Tracker.Org, "contoso", "envorg")
 	}
 }
 

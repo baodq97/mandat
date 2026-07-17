@@ -14,12 +14,12 @@ func TestSystemdRunArgv_WrapsChildAsRoleUser(t *testing.T) {
 
 	got := systemdRunArgv(SpawnSpec{
 		RoleUser: "mandat-dev",
-		Dir:      "/var/lib/mandat/tasks/ado-baodo0220-42",
+		Dir:      "/var/lib/mandat/tasks/ado-contoso-42",
 		Argv:     []string{"claude", "-p", "--bare"},
 	})
 	want := []string{
 		"systemd-run", "--uid=mandat-dev", "--pipe", "--collect", "--wait",
-		"--working-directory=/var/lib/mandat/tasks/ado-baodo0220-42",
+		"--working-directory=/var/lib/mandat/tasks/ado-contoso-42",
 		"--", "claude", "-p", "--bare",
 	}
 	if !slices.Equal(got, want) {

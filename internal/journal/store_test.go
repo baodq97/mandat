@@ -34,13 +34,13 @@ func openStore(t *testing.T) *Store {
 // mirroring the fixture shape internal/task uses.
 func devTask() *task.TaskContract {
 	return &task.TaskContract{
-		ID: "ado-baodo0220-42",
+		ID: "ado-contoso-42",
 		TrackerRef: task.TrackerRef{
 			System:     task.TrackerAzureDevOps,
-			Org:        "baodo0220",
+			Org:        "contoso",
 			Project:    "mandat-dogfood",
 			WorkItemID: "42",
-			URL:        "https://dev.azure.com/baodo0220/mandat-dogfood/_workitems/edit/42",
+			URL:        "https://dev.azure.com/contoso/mandat-dogfood/_workitems/edit/42",
 		},
 		Type:          task.TypeDevTask,
 		Title:         "Add the version subcommand",
@@ -290,7 +290,7 @@ func TestResult_RoundTrips(t *testing.T) {
 		SchemaVersion: result.SchemaVersion,
 		TaskID:        "task-1",
 		Status:        result.StatusCompleted,
-		Artifacts:     []result.Artifact{{Repo: "mandat", Branch: "feat/version", PRURL: "https://dev.azure.com/baodo0220/_git/mandat/pullrequest/1"}},
+		Artifacts:     []result.Artifact{{Repo: "mandat", Branch: "feat/version", PRURL: "https://dev.azure.com/contoso/_git/mandat/pullrequest/1"}},
 	}
 	validRaw, err := json.Marshal(validContract)
 	if err != nil {

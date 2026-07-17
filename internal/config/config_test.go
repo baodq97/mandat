@@ -24,17 +24,17 @@ func writeConfig(t *testing.T, content string) string {
 const validYAML = `
 tracker:
   kind: azure-devops
-  org: baodo0220
+  org: contoso
   project: mandat-dogfood
 auth:
   mode: arc-managed-identity
 entra:
-  tenant: d1a7b725-aaaa-bbbb-cccc-dddddddddddd
+  tenant: 11111111-1111-1111-1111-111111111111
   blueprint: blueprint-01
   identity_mode: agent-user-pair
 repos:
   mandat:
-    url: https://dev.azure.com/baodo0220/mandat-dogfood/_git/mandat
+    url: https://dev.azure.com/contoso/mandat-dogfood/_git/mandat
     base_branch: main
     paths:
       - internal/
@@ -46,7 +46,7 @@ roles:
   dev:
     agent_identity_id: agent-identity-dev-01
     agent_user_id: agent-user-dev-01
-    agent_user_name: dev-agent@baodo0220.onmicrosoft.com
+    agent_user_name: dev-agent@contoso.onmicrosoft.com
     autonomy_ceiling: draft-pr
     model_tier: opus
     playbook: playbooks/dev.md
@@ -55,7 +55,7 @@ roles:
   qa:
     agent_identity_id: agent-identity-qa-01
     agent_user_id: agent-user-qa-01
-    agent_user_name: qa-agent@baodo0220.onmicrosoft.com
+    agent_user_name: qa-agent@contoso.onmicrosoft.com
     autonomy_ceiling: report
     playbook: playbooks/qa.md
 budget:
@@ -77,19 +77,19 @@ func TestLoad_ValidRoundTrips(t *testing.T) {
 	want := &Config{
 		Tracker: TrackerConfig{
 			Kind:    TrackerAzureDevOps,
-			Org:     "baodo0220",
+			Org:     "contoso",
 			Project: "mandat-dogfood",
 			States:  TrackerStatesConfig{InProgress: DefaultInProgressState},
 		},
 		Auth: AuthConfig{Mode: AuthArcManagedIdentity},
 		Entra: EntraConfig{
-			Tenant:       "d1a7b725-aaaa-bbbb-cccc-dddddddddddd",
+			Tenant:       "11111111-1111-1111-1111-111111111111",
 			Blueprint:    "blueprint-01",
 			IdentityMode: IdentityAgentUserPair,
 		},
 		Repos: map[string]RepoConfig{
 			"mandat": {
-				URL:        "https://dev.azure.com/baodo0220/mandat-dogfood/_git/mandat",
+				URL:        "https://dev.azure.com/contoso/mandat-dogfood/_git/mandat",
 				BaseBranch: "main",
 				Paths:      []string{"internal/", "cmd/"},
 				Gates:      []string{"make check", "npx govkit check"},
@@ -99,7 +99,7 @@ func TestLoad_ValidRoundTrips(t *testing.T) {
 			"dev": {
 				AgentIdentityID: "agent-identity-dev-01",
 				AgentUserID:     "agent-user-dev-01",
-				AgentUserName:   "dev-agent@baodo0220.onmicrosoft.com",
+				AgentUserName:   "dev-agent@contoso.onmicrosoft.com",
 				AutonomyCeiling: CeilingDraftPR,
 				ModelTier:       ModelOpus,
 				Playbook:        "playbooks/dev.md",
@@ -108,7 +108,7 @@ func TestLoad_ValidRoundTrips(t *testing.T) {
 			"qa": {
 				AgentIdentityID: "agent-identity-qa-01",
 				AgentUserID:     "agent-user-qa-01",
-				AgentUserName:   "qa-agent@baodo0220.onmicrosoft.com",
+				AgentUserName:   "qa-agent@contoso.onmicrosoft.com",
 				AutonomyCeiling: CeilingReport,
 				Playbook:        "playbooks/qa.md",
 			},
@@ -169,8 +169,8 @@ func TestLoad_TrackerStatesInProgress(t *testing.T) {
 		t.Parallel()
 
 		path := writeConfig(t, strings.Replace(baseYAML,
-			"tracker:\n  kind: azure-devops\n  org: baodo0220\n  project: mandat-dogfood\n",
-			"tracker:\n  kind: azure-devops\n  org: baodo0220\n  project: mandat-dogfood\n  states:\n    in_progress: In Development\n",
+			"tracker:\n  kind: azure-devops\n  org: contoso\n  project: mandat-dogfood\n",
+			"tracker:\n  kind: azure-devops\n  org: contoso\n  project: mandat-dogfood\n  states:\n    in_progress: In Development\n",
 			1))
 		cfg, err := Load(path)
 		if err != nil {
@@ -302,7 +302,7 @@ func TestLoad_BudgetMaxUSDInFlight(t *testing.T) {
 const baseYAML = `
 tracker:
   kind: azure-devops
-  org: baodo0220
+  org: contoso
   project: mandat-dogfood
 auth:
   mode: arc-managed-identity
@@ -320,7 +320,7 @@ roles:
   dev:
     agent_identity_id: agent-identity-dev-01
     agent_user_id: agent-user-dev-01
-    agent_user_name: dev-agent@baodo0220.onmicrosoft.com
+    agent_user_name: dev-agent@contoso.onmicrosoft.com
     autonomy_ceiling: draft-pr
     playbook: playbooks/dev.md
 budget:
@@ -421,7 +421,7 @@ func TestLoad_RejectsInvalid(t *testing.T) {
 		{
 			name: "missing agent_user_name under agent-user-pair",
 			mutate: func(s string) string {
-				return strings.Replace(s, "    agent_user_name: dev-agent@baodo0220.onmicrosoft.com\n", "", 1)
+				return strings.Replace(s, "    agent_user_name: dev-agent@contoso.onmicrosoft.com\n", "", 1)
 			},
 			wantSub: "roles.dev.agent_user_name",
 		},

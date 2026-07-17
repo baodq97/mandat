@@ -147,8 +147,8 @@ func TestReviewerIdentityCheck(t *testing.T) {
 		{
 			name: "pass: reviewer distinct from dev",
 			roles: map[string]config.RoleConfig{
-				"dev":      {AgentUserName: "dev-agent@baodo0220.onmicrosoft.com"},
-				"reviewer": {AgentUserName: "reviewer-agent@baodo0220.onmicrosoft.com"},
+				"dev":      {AgentUserName: "dev-agent@contoso.onmicrosoft.com"},
+				"reviewer": {AgentUserName: "reviewer-agent@contoso.onmicrosoft.com"},
 			},
 			wantOK:  true,
 			wantReq: true,
@@ -156,7 +156,7 @@ func TestReviewerIdentityCheck(t *testing.T) {
 		{
 			name: "warn: no reviewer role configured",
 			roles: map[string]config.RoleConfig{
-				"dev": {AgentUserName: "dev-agent@baodo0220.onmicrosoft.com"},
+				"dev": {AgentUserName: "dev-agent@contoso.onmicrosoft.com"},
 			},
 			wantOK:     false,
 			wantReq:    false,
@@ -165,8 +165,8 @@ func TestReviewerIdentityCheck(t *testing.T) {
 		{
 			name: "fail: reviewer UPN equals dev UPN",
 			roles: map[string]config.RoleConfig{
-				"dev":      {AgentUserName: "shared-agent@baodo0220.onmicrosoft.com"},
-				"reviewer": {AgentUserName: "shared-agent@baodo0220.onmicrosoft.com"},
+				"dev":      {AgentUserName: "shared-agent@contoso.onmicrosoft.com"},
+				"reviewer": {AgentUserName: "shared-agent@contoso.onmicrosoft.com"},
 			},
 			wantOK:     false,
 			wantReq:    true,

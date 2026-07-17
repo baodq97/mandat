@@ -44,7 +44,7 @@ func provisionForTest(t *testing.T) *Workspace {
 		RepoURL:   newBareOrigin(t),
 		MirrorDir: filepath.Join(t.TempDir(), "mirror.git"),
 		TasksRoot: t.TempDir(),
-		TaskID:    "ado-baodo0220-42",
+		TaskID:    "ado-contoso-42",
 		Remit:     task.Remit{Repo: "mandat", BaseBranch: "main", Paths: []string{"cmd/mandat/", "internal/buildinfo/"}},
 	}
 	ws, err := Provision(context.Background(), cfg)
@@ -150,7 +150,7 @@ func TestProvision_SetupFailureHasNoFallback(t *testing.T) {
 		RepoURL:   filepath.Join(t.TempDir(), "does-not-exist.git"),
 		MirrorDir: filepath.Join(t.TempDir(), "mirror.git"),
 		TasksRoot: t.TempDir(),
-		TaskID:    "ado-baodo0220-99",
+		TaskID:    "ado-contoso-99",
 		Remit:     task.Remit{Repo: "mandat", BaseBranch: "main", Paths: []string{"cmd/mandat/"}},
 	}
 
@@ -177,12 +177,12 @@ func TestProvision_ConcurrentSameRepoWarmMirrorNoRace(t *testing.T) {
 	tasksRoot := t.TempDir()
 	remit := task.Remit{Repo: "mandat", BaseBranch: "main", Paths: []string{"cmd/mandat/", "internal/buildinfo/"}}
 
-	warm := Config{RepoURL: origin, MirrorDir: mirrorDir, TasksRoot: tasksRoot, TaskID: "ado-baodo0220-warm", Remit: remit}
+	warm := Config{RepoURL: origin, MirrorDir: mirrorDir, TasksRoot: tasksRoot, TaskID: "ado-contoso-warm", Remit: remit}
 	if _, err := Provision(context.Background(), warm); err != nil {
 		t.Fatalf("warm-up Provision() error = %v, want nil", err)
 	}
 
-	taskIDs := []string{"ado-baodo0220-race-a", "ado-baodo0220-race-b"}
+	taskIDs := []string{"ado-contoso-race-a", "ado-contoso-race-b"}
 	var wg sync.WaitGroup
 	results := make([]*Workspace, len(taskIDs))
 	errs := make([]error, len(taskIDs))
@@ -227,14 +227,14 @@ func TestProvision_RefreshKeepsPriorTaskBranches(t *testing.T) {
 	tasksRoot := t.TempDir()
 	remit := task.Remit{Repo: "mandat", BaseBranch: "main", Paths: []string{"cmd/mandat/", "internal/buildinfo/"}}
 
-	first, err := Provision(context.Background(), Config{RepoURL: origin, MirrorDir: mirrorDir, TasksRoot: tasksRoot, TaskID: "ado-baodo0220-first", Remit: remit})
+	first, err := Provision(context.Background(), Config{RepoURL: origin, MirrorDir: mirrorDir, TasksRoot: tasksRoot, TaskID: "ado-contoso-first", Remit: remit})
 	if err != nil {
 		t.Fatalf("first Provision() error = %v, want nil", err)
 	}
 
 	// A second task provisions against the now-warm mirror; its refresh fetch runs
 	// and must not prune the first task's branch out from under its open worktree.
-	if _, err := Provision(context.Background(), Config{RepoURL: origin, MirrorDir: mirrorDir, TasksRoot: tasksRoot, TaskID: "ado-baodo0220-second", Remit: remit}); err != nil {
+	if _, err := Provision(context.Background(), Config{RepoURL: origin, MirrorDir: mirrorDir, TasksRoot: tasksRoot, TaskID: "ado-contoso-second", Remit: remit}); err != nil {
 		t.Fatalf("second Provision() error = %v, want nil", err)
 	}
 
@@ -258,8 +258,8 @@ func TestProvision_ConcurrentDifferentReposDoNotShareALock(t *testing.T) {
 	remit := task.Remit{Repo: "mandat", BaseBranch: "main", Paths: []string{"cmd/mandat/", "internal/buildinfo/"}}
 	tasksRoot := t.TempDir()
 	configs := []Config{
-		{RepoURL: newBareOrigin(t), MirrorDir: filepath.Join(t.TempDir(), "mirror-a.git"), TasksRoot: tasksRoot, TaskID: "ado-baodo0220-repo-a", Remit: remit},
-		{RepoURL: newBareOrigin(t), MirrorDir: filepath.Join(t.TempDir(), "mirror-b.git"), TasksRoot: tasksRoot, TaskID: "ado-baodo0220-repo-b", Remit: remit},
+		{RepoURL: newBareOrigin(t), MirrorDir: filepath.Join(t.TempDir(), "mirror-a.git"), TasksRoot: tasksRoot, TaskID: "ado-contoso-repo-a", Remit: remit},
+		{RepoURL: newBareOrigin(t), MirrorDir: filepath.Join(t.TempDir(), "mirror-b.git"), TasksRoot: tasksRoot, TaskID: "ado-contoso-repo-b", Remit: remit},
 	}
 
 	var wg sync.WaitGroup
@@ -341,7 +341,7 @@ func TestProvision_CredentialHelperOverrideHarmlessAgainstLocalOrigin(t *testing
 		RepoURL:          newBareOrigin(t),
 		MirrorDir:        filepath.Join(t.TempDir(), "mirror.git"),
 		TasksRoot:        t.TempDir(),
-		TaskID:           "ado-baodo0220-43",
+		TaskID:           "ado-contoso-43",
 		Remit:            task.Remit{Repo: "mandat", BaseBranch: "main", Paths: []string{"cmd/mandat/", "internal/buildinfo/"}},
 		CredentialHelper: "!mandat git-credential --role dev",
 	}
@@ -365,7 +365,7 @@ func TestProvision_MirrorStaysBareWorktreeOverrides(t *testing.T) {
 		RepoURL:   newBareOrigin(t),
 		MirrorDir: mirrorDir,
 		TasksRoot: t.TempDir(),
-		TaskID:    "ado-baodo0220-44",
+		TaskID:    "ado-contoso-44",
 		Remit:     task.Remit{Repo: "mandat", BaseBranch: "main", Paths: []string{"cmd/mandat/", "internal/buildinfo/"}},
 	}
 	ws, err := Provision(context.Background(), cfg)
@@ -404,7 +404,7 @@ func TestProvision_HealsV011PoisonedMirror(t *testing.T) {
 	}
 
 	first := base
-	first.TaskID = "ado-baodo0220-45"
+	first.TaskID = "ado-contoso-45"
 	if _, err := Provision(context.Background(), first); err != nil {
 		t.Fatalf("first Provision() error = %v, want nil", err)
 	}
@@ -416,7 +416,7 @@ func TestProvision_HealsV011PoisonedMirror(t *testing.T) {
 	pushNewCommitToDefaultBranch(t, origin)
 
 	second := base
-	second.TaskID = "ado-baodo0220-46"
+	second.TaskID = "ado-contoso-46"
 	ws, err := Provision(context.Background(), second)
 	if err != nil {
 		t.Fatalf("second Provision() against a v0.1.1-poisoned mirror = %v, want nil (heal expected)", err)

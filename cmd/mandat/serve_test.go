@@ -38,15 +38,15 @@ import (
 const (
 	devUser         = "agent-user-dev-01@baotest.onmicrosoft.com"
 	reviewerUser    = "agent-user-reviewer-01@baotest.onmicrosoft.com"
-	skeletonOrg     = "baodo0220"
+	skeletonOrg     = "contoso"
 	skeletonProject = "mandat"
-	skeletonPRURL   = "https://dev.azure.com/baodo0220/mandat/_git/mandat/pullrequest/7"
+	skeletonPRURL   = "https://dev.azure.com/contoso/mandat/_git/mandat/pullrequest/7"
 )
 
 // completedResult is the exact ResultContract the fake claude writes on the happy
 // path; the assertion compares the journaled raw bytes against it, so both sides
 // share one source (mirrors the runner package's §9 fake-claude discipline).
-const completedResult = `{"schema_version":1,"task_id":"ado-baodo0220-42","status":"completed","artifacts":[{"repo":"mandat","branch":"mandat/ado-baodo0220-42","pr_url":"https://dev.azure.com/baodo0220/mandat/_git/mandat/pullrequest/7"}]}`
+const completedResult = `{"schema_version":1,"task_id":"ado-contoso-42","status":"completed","artifacts":[{"repo":"mandat","branch":"mandat/ado-contoso-42","pr_url":"https://dev.azure.com/contoso/mandat/_git/mandat/pullrequest/7"}]}`
 
 // workItem42Body is the recorded-ADO work-item fixture: assigned to the Dev agent
 // user, tagged for the in-registry `mandat` repo (RFC-0001 §9 recorded fixture).
@@ -67,7 +67,7 @@ const workItem42Body = `{
 const pullRequest7Body = `{
   "pullRequestId": 7,
   "isDraft": true,
-  "url": "https://dev.azure.com/baodo0220/mandat/_apis/git/repositories/mandat/pullRequests/7",
+  "url": "https://dev.azure.com/contoso/mandat/_apis/git/repositories/mandat/pullRequests/7",
   "createdBy": { "uniqueName": "agent-user-dev-01@baotest.onmicrosoft.com" }
 }`
 
@@ -765,7 +765,7 @@ func TestDispatchCycle_PoolOneIsSequential(t *testing.T) {
 	}
 }
 
-// TestRunDispatchLoop_Once is ado-baodo0220-31: --once must run exactly one
+// TestRunDispatchLoop_Once is ado-contoso-31: --once must run exactly one
 // dispatch cycle through the same dispatchCycle the daemon loop calls (same
 // drain-per-cycle semantics) and return without ever creating a ticker. An
 // interval far longer than the test timeout proves the ticker path is never

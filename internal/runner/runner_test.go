@@ -22,7 +22,7 @@ import (
 
 // fakeTaskID is the task the fake claude writes ResultContracts for; the tests'
 // TaskContract carries the same id so result.Parse's task_id check passes.
-const fakeTaskID = "ado-baodo0220-42"
+const fakeTaskID = "ado-contoso-42"
 
 // verboseFillerCount is how many filler stream-json lines the "verbose_completed"
 // scenario emits — comfortably past maxStreamTailEvents, so the tail-persist test
@@ -33,10 +33,10 @@ const verboseFillerCount = 250
 // package consts so both the fake (which writes them from the re-exec'd child)
 // and the assertions (which compare the journaled raw bytes) share one source.
 const (
-	completedResult     = `{"schema_version":1,"task_id":"ado-baodo0220-42","status":"completed","artifacts":[{"repo":"mandat","branch":"mandat/ado-baodo0220-42","pr_url":"https://dev.azure.com/baodo0220/mandat-dogfood/_git/mandat/pullrequest/7"}]}`
-	needsHumanResult    = `{"schema_version":1,"task_id":"ado-baodo0220-42","status":"needs_human","reason":"acceptance criteria ambiguous: which auth mode is expected?"}`
-	failedResult        = `{"schema_version":1,"task_id":"ado-baodo0220-42","status":"failed","reason":"build failed: toolchain missing"}`
-	invalidSchemaResult = `{"schema_version":1,"task_id":"ado-baodo0220-42","status":"completed"}`
+	completedResult     = `{"schema_version":1,"task_id":"ado-contoso-42","status":"completed","artifacts":[{"repo":"mandat","branch":"mandat/ado-contoso-42","pr_url":"https://dev.azure.com/contoso/mandat-dogfood/_git/mandat/pullrequest/7"}]}`
+	needsHumanResult    = `{"schema_version":1,"task_id":"ado-contoso-42","status":"needs_human","reason":"acceptance criteria ambiguous: which auth mode is expected?"}`
+	failedResult        = `{"schema_version":1,"task_id":"ado-contoso-42","status":"failed","reason":"build failed: toolchain missing"}`
+	invalidSchemaResult = `{"schema_version":1,"task_id":"ado-contoso-42","status":"completed"}`
 	malformedResult     = `this is not json {`
 )
 
@@ -398,10 +398,10 @@ func TestSupervisor_Run_DeliversTaskPrompt(t *testing.T) {
 		},
 		TrackerRef: task.TrackerRef{
 			System:     task.TrackerAzureDevOps,
-			Org:        "baodo0220",
+			Org:        "contoso",
 			Project:    "mandat-dogfood",
 			WorkItemID: "42",
-			URL:        "https://dev.azure.com/baodo0220/mandat-dogfood/_workitems/edit/42",
+			URL:        "https://dev.azure.com/contoso/mandat-dogfood/_workitems/edit/42",
 		},
 	}
 
@@ -589,7 +589,7 @@ func TestSupervisor_Run_ChildCrashNoFile(t *testing.T) {
 	}
 }
 
-// TestSupervisor_Run_PersistsStreamTail is the ado-baodo0220-29 fix: a run that
+// TestSupervisor_Run_PersistsStreamTail is the ado-contoso-29 fix: a run that
 // dies without a ResultContract must still leave evidence of why (live escape: WI
 // 28 died twice with zero post-mortem data). The fake claude emits far more than
 // maxStreamTailEvents lines; the persisted tail file must be capped at the last
@@ -867,7 +867,7 @@ func TestBuildArgv_ADR0006FlagSet(t *testing.T) {
 func TestTaskPrompt(t *testing.T) {
 	t.Parallel()
 	tc := task.TaskContract{
-		ID:         "ado-baodo0220-42",
+		ID:         "ado-contoso-42",
 		Title:      "Add retry with backoff to the ADO client",
 		Acceptance: "backs off exponentially and gives up after 5 attempts",
 		Remit:      task.Remit{Paths: []string{"internal/tracker/ado/", "internal/tracker/retry.go"}},

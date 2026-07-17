@@ -18,7 +18,7 @@ func testConfig() *config.Config {
 			"dev": {
 				AgentIdentityID: "agent-identity-dev-01",
 				AgentUserID:     "agent-user-dev-01",
-				AgentUserName:   "dev-agent@baodo0220.onmicrosoft.com",
+				AgentUserName:   "dev-agent@contoso.onmicrosoft.com",
 				AutonomyCeiling: config.CeilingDraftPR,
 				ModelTier:       config.ModelOpus,
 				Playbook:        "playbooks/dev.md",
@@ -28,7 +28,7 @@ func testConfig() *config.Config {
 			"qa": {
 				AgentIdentityID: "agent-identity-qa-01",
 				AgentUserID:     "agent-user-qa-01",
-				AgentUserName:   "qa-agent@baodo0220.onmicrosoft.com",
+				AgentUserName:   "qa-agent@contoso.onmicrosoft.com",
 				AutonomyCeiling: config.CeilingReport,
 				Playbook:        "playbooks/qa.md",
 			},
@@ -55,7 +55,7 @@ func TestResolve(t *testing.T) {
 				Mandate: MandateRef{
 					AgentIdentityID: "agent-identity-dev-01",
 					AgentUserID:     "agent-user-dev-01",
-					AgentUserName:   "dev-agent@baodo0220.onmicrosoft.com",
+					AgentUserName:   "dev-agent@contoso.onmicrosoft.com",
 				},
 				Playbook:        "playbooks/dev.md",
 				Skills:          []string{"go-testing"},
@@ -75,7 +75,7 @@ func TestResolve(t *testing.T) {
 				Mandate: MandateRef{
 					AgentIdentityID: "agent-identity-qa-01",
 					AgentUserID:     "agent-user-qa-01",
-					AgentUserName:   "qa-agent@baodo0220.onmicrosoft.com",
+					AgentUserName:   "qa-agent@contoso.onmicrosoft.com",
 				},
 				Playbook:        "playbooks/qa.md",
 				AutonomyCeiling: config.CeilingReport,
