@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"io"
@@ -42,7 +43,9 @@ func (s *stringSliceFlag) Set(v string) error {
 }
 
 // nonInteractiveInput is every irreducible field US-0013 AC-13.3(c) and
-// AC-13.9 name, collected from --non-interactive flags.
+// AC-13.9 name, collected from --non-interactive flags or, in slice 3, from
+// the interactive interview (runInteractiveInterview). Both paths converge
+// on this one shape so validate and render never fork.
 type nonInteractiveInput struct {
 	trackerOrg     string
 	trackerProject string
@@ -67,16 +70,24 @@ type nonInteractiveInput struct {
 
 	autonomyCeiling string
 	maxUSDPerRun    float64
+
+	// inProgressState and poolSize are the applyDefaults fields (US-0013
+	// AC-13.3(a)): the --non-interactive path never sets them (they
+	// stay at their zero value, config.go's own "unset" sentinel), so render
+	// keeps writing the commented default-explanation form. The interactive
+	// interview lets an operator override either.
+	inProgressState string
+	poolSize        int
 }
 
-// initCmd writes /etc/mandat/config.yaml from operator-supplied flags
-// (US-0013 slice 1). Only the --non-interactive path is implemented: it
-// validates every irreducible field is present as a flag, renders a fully
-// commented config.yaml, and writes it in one shot. A TTY session without
-// --non-interactive gets a clear "not implemented yet" error instead of a
-// blocking prompt: the interactive interview itself is a later slice's
-// scope, so this never reads stdin (AC-13.9's non-TTY autodetect holds
-// trivially — every path here is non-interactive).
+// initCmd writes /etc/mandat/config.yaml either from operator-supplied
+// flags (US-0013 slice 1, --non-interactive) or, when stdin is a live
+// terminal and --non-interactive is absent, from an interactive interview
+// (US-0013 slice 3, AC-13.3(c)). AC-13.9's non-TTY autodetect means any
+// non-terminal stdin — including every test double, none of which is an
+// *os.File — always takes the flag path, so the interactive path is
+// exercised directly through runInteractiveInterview in tests, not through
+// this TTY gate.
 func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -110,8 +121,16 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	if !*nonInteractiveFlag && isTTY(stdin) {
-		fmt.Fprintln(stderr, "mandat init: interactive setup is not implemented in this build; rerun with --non-interactive and the required flags")
-		return 2
+		interviewed, err := runInteractiveInterview(stdin, stdout)
+		if err != nil {
+			fmt.Fprintf(stderr, "mandat init: %v\n", err)
+			return 1
+		}
+		if err := interviewed.validate(); err != nil {
+			fmt.Fprintf(stderr, "mandat init: %v\n", err)
+			return 1
+		}
+		return writeConfig(interviewed, *configPath, stdout, stderr)
 	}
 
 	in := nonInteractiveInput{
@@ -142,17 +161,24 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	return writeConfig(in, *configPath, stdout, stderr)
+}
+
+// writeConfig renders in and writes it to configPath, the one emit path
+// both the --non-interactive and interactive callers of initCmd share
+// (reuse the render function, never fork it: one emit path for both callers).
+func writeConfig(in nonInteractiveInput, configPath string, stdout, stderr io.Writer) int {
 	yamlText := in.render()
 
-	if err := os.MkdirAll(filepath.Dir(*configPath), 0o750); err != nil {
-		fmt.Fprintf(stderr, "mandat init: create %s: %v\n", filepath.Dir(*configPath), err)
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o750); err != nil {
+		fmt.Fprintf(stderr, "mandat init: create %s: %v\n", filepath.Dir(configPath), err)
 		return 1
 	}
-	if err := os.WriteFile(*configPath, []byte(yamlText), 0o600); err != nil {
-		fmt.Fprintf(stderr, "mandat init: write %s: %v\n", *configPath, err)
+	if err := os.WriteFile(configPath, []byte(yamlText), 0o600); err != nil {
+		fmt.Fprintf(stderr, "mandat init: write %s: %v\n", configPath, err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "mandat init: wrote %s\n", *configPath)
+	fmt.Fprintf(stdout, "mandat init: wrote %s\n", configPath)
 	return 0
 }
 
@@ -238,9 +264,14 @@ func (in nonInteractiveInput) render() string {
 	fmt.Fprintf(&b, "  kind: %s\n", config.TrackerAzureDevOps)
 	fmt.Fprintf(&b, "  org: %s\n", in.trackerOrg)
 	fmt.Fprintf(&b, "  project: %s\n", in.trackerProject)
-	fmt.Fprintf(&b, "  # states.in_progress default: %s (US-0011); the work-item state serve applies on dispatch, before the runner spawns\n", config.DefaultInProgressState)
-	b.WriteString("  # states:\n")
-	fmt.Fprintf(&b, "  #   in_progress: %s\n", config.DefaultInProgressState)
+	if in.inProgressState != "" {
+		b.WriteString("  states:\n")
+		fmt.Fprintf(&b, "    in_progress: %s\n", in.inProgressState)
+	} else {
+		fmt.Fprintf(&b, "  # states.in_progress default: %s (US-0011); the work-item state serve applies on dispatch, before the runner spawns\n", config.DefaultInProgressState)
+		b.WriteString("  # states:\n")
+		fmt.Fprintf(&b, "  #   in_progress: %s\n", config.DefaultInProgressState)
+	}
 	b.WriteString("\n")
 
 	b.WriteString("auth:\n")
@@ -271,9 +302,14 @@ func (in nonInteractiveInput) render() string {
 	b.WriteString(renderRole("reviewer", in.reviewerIdentityID, in.reviewerUserID, in.reviewerUserUPN, string(reviewerAutonomyCeiling), reviewerPlaybookPath))
 	b.WriteString("\n")
 
-	fmt.Fprintf(&b, "# runner.pool_size default: %d (US-0012 AC-12.1); bounds concurrent in-flight tasks\n", config.DefaultPoolSize)
-	b.WriteString("# runner:\n")
-	fmt.Fprintf(&b, "#   pool_size: %d\n\n", config.DefaultPoolSize)
+	if in.poolSize != 0 {
+		b.WriteString("runner:\n")
+		fmt.Fprintf(&b, "  pool_size: %d\n\n", in.poolSize)
+	} else {
+		fmt.Fprintf(&b, "# runner.pool_size default: %d (US-0012 AC-12.1); bounds concurrent in-flight tasks\n", config.DefaultPoolSize)
+		b.WriteString("# runner:\n")
+		fmt.Fprintf(&b, "#   pool_size: %d\n\n", config.DefaultPoolSize)
+	}
 
 	b.WriteString("budget:\n")
 	fmt.Fprintf(&b, "  max_usd_per_run: %s\n", strconv.FormatFloat(in.maxUSDPerRun, 'f', -1, 64))
@@ -301,4 +337,233 @@ func renderRole(name, identityID, userID, userUPN, ceiling, playbook string) str
 	b.WriteString("    # skills: no default; omitted means the role runs no named skills\n")
 	b.WriteString("    # remit_paths: no default; omitted means no per-role remit override (the repo registry's paths apply)\n")
 	return b.String()
+}
+
+// interviewer drives the AC-13.3(c) prompt loop over an injectable
+// io.Reader (never os.Stdin directly), so tests script it with a
+// strings.Reader instead of a live terminal.
+type interviewer struct {
+	r *bufio.Reader
+	w io.Writer
+}
+
+// readLine reads one operator response, trimmed of surrounding whitespace
+// and the trailing newline. eof is true only once stdin is exhausted with
+// nothing left to give — a last line with no trailing newline still comes
+// back as ordinary input, not eof.
+func (iv *interviewer) readLine() (line string, eof bool) {
+	text, err := iv.r.ReadString('\n')
+	text = strings.TrimSpace(text)
+	if err != nil && text == "" {
+		return "", true
+	}
+	return text, false
+}
+
+// required prompts label and re-prompts on a blank answer or a validate
+// failure, so a required field left empty re-prompts rather than letting an
+// invalid config get written (US-0013 AC-13.3(c)). validate may be
+// nil for fields with no format beyond "non-empty".
+func (iv *interviewer) required(label string, validate func(string) error) (string, error) {
+	for {
+		fmt.Fprintf(iv.w, "%s: ", label)
+		value, eof := iv.readLine()
+		if value == "" {
+			if eof {
+				return "", fmt.Errorf("%s is required (stdin closed before a value was entered)", label)
+			}
+			fmt.Fprintf(iv.w, "  %s is required, try again\n", label)
+			continue
+		}
+		if validate != nil {
+			if err := validate(value); err != nil {
+				fmt.Fprintf(iv.w, "  %v, try again\n", err)
+				continue
+			}
+		}
+		return value, nil
+	}
+}
+
+// withDefault prompts label with def shown in brackets and returns "" on a
+// blank answer, the sentinel the
+// caller's field already uses to mean "keep the built-in default".
+func (iv *interviewer) withDefault(label, def string) string {
+	fmt.Fprintf(iv.w, "%s [%s]: ", label, def)
+	value, _ := iv.readLine()
+	return value
+}
+
+// withDefaultValidated is withDefault plus a re-prompt loop for a
+// non-blank answer that fails validate; a blank answer always short-circuits
+// straight to "" (keep default) without running validate.
+func (iv *interviewer) withDefaultValidated(label, def string, validate func(string) error) string {
+	for {
+		value := iv.withDefault(label, def)
+		if value == "" {
+			return ""
+		}
+		if err := validate(value); err != nil {
+			fmt.Fprintf(iv.w, "  %v, try again\n", err)
+			continue
+		}
+		return value
+	}
+}
+
+// repeated collects a repeatable field (remit paths, gate commands): one
+// entry per line, a blank line ends the list. At least one entry is
+// required; a blank first line re-prompts instead of accepting an empty
+// list.
+func (iv *interviewer) repeated(label string) ([]string, error) {
+	fmt.Fprintf(iv.w, "%s (one per line, blank line to finish):\n", label)
+	var values []string
+	for {
+		fmt.Fprint(iv.w, "  > ")
+		value, eof := iv.readLine()
+		if value == "" {
+			if len(values) > 0 {
+				return values, nil
+			}
+			if eof {
+				return nil, fmt.Errorf("at least one %s is required (stdin closed before a value was entered)", label)
+			}
+			fmt.Fprintf(iv.w, "  at least one %s is required, try again\n", label)
+			continue
+		}
+		values = append(values, value)
+		if eof {
+			return values, nil
+		}
+	}
+}
+
+func validateAuthMode(v string) error {
+	switch config.AuthMode(v) {
+	case config.AuthArcManagedIdentity, config.AuthClientCertificate:
+		return nil
+	default:
+		return fmt.Errorf("must be %q or %q", config.AuthArcManagedIdentity, config.AuthClientCertificate)
+	}
+}
+
+func validateAutonomyCeiling(v string) error {
+	switch config.AutonomyCeiling(v) {
+	case config.CeilingReport, config.CeilingDraftPR, config.CeilingUnattended:
+		return nil
+	default:
+		return fmt.Errorf("must be %q, %q, or %q", config.CeilingReport, config.CeilingDraftPR, config.CeilingUnattended)
+	}
+}
+
+func validatePositiveUSD(v string) error {
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return fmt.Errorf("must be a number")
+	}
+	if f <= 0 {
+		return fmt.Errorf("must be greater than zero")
+	}
+	return nil
+}
+
+func validateNonNegativeInt(v string) error {
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fmt.Errorf("must be a whole number")
+	}
+	if n < 0 {
+		return fmt.Errorf("must not be negative")
+	}
+	return nil
+}
+
+// runInteractiveInterview drives the AC-13.3(c) prompt loop, collecting
+// every irreducible field plus the two applyDefaults fields
+// (tracker.states.in_progress, runner.pool_size) whose prompts show their
+// default in brackets. Constants (tracker.kind, entra.identity_mode) are
+// never prompted: nonInteractiveInput and render already supply them.
+// Whatever it collects flows through the exact same validate/render pair
+// the --non-interactive path uses.
+func runInteractiveInterview(stdin io.Reader, out io.Writer) (nonInteractiveInput, error) {
+	iv := &interviewer{r: bufio.NewReader(stdin), w: out}
+	var in nonInteractiveInput
+	var err error
+
+	if in.trackerOrg, err = iv.required("tracker.org", nil); err != nil {
+		return in, err
+	}
+	if in.trackerProject, err = iv.required("tracker.project", nil); err != nil {
+		return in, err
+	}
+	in.inProgressState = iv.withDefault("tracker.states.in_progress", config.DefaultInProgressState)
+
+	if in.authMode, err = iv.required(
+		fmt.Sprintf("auth.mode (%s or %s)", config.AuthArcManagedIdentity, config.AuthClientCertificate), validateAuthMode,
+	); err != nil {
+		return in, err
+	}
+	if in.entraTenant, err = iv.required("entra.tenant", nil); err != nil {
+		return in, err
+	}
+	if in.entraBlueprint, err = iv.required("entra.blueprint", nil); err != nil {
+		return in, err
+	}
+
+	if in.repoKey, err = iv.required("repo key", nil); err != nil {
+		return in, err
+	}
+	if in.repoURL, err = iv.required("repo url", nil); err != nil {
+		return in, err
+	}
+	in.repoRaw = in.repoKey + "=" + in.repoURL
+	if in.baseBranch, err = iv.required("repo base_branch", nil); err != nil {
+		return in, err
+	}
+	if in.remitPaths, err = iv.repeated("repo remit path"); err != nil {
+		return in, err
+	}
+	if in.gates, err = iv.repeated("gate command"); err != nil {
+		return in, err
+	}
+
+	if in.devIdentityID, err = iv.required("roles.dev.agent_identity_id", nil); err != nil {
+		return in, err
+	}
+	if in.devUserID, err = iv.required("roles.dev.agent_user_id", nil); err != nil {
+		return in, err
+	}
+	if in.devUserUPN, err = iv.required("roles.dev.agent_user_name (UPN)", nil); err != nil {
+		return in, err
+	}
+
+	if in.reviewerIdentityID, err = iv.required("roles.reviewer.agent_identity_id", nil); err != nil {
+		return in, err
+	}
+	if in.reviewerUserID, err = iv.required("roles.reviewer.agent_user_id", nil); err != nil {
+		return in, err
+	}
+	if in.reviewerUserUPN, err = iv.required("roles.reviewer.agent_user_name (UPN)", nil); err != nil {
+		return in, err
+	}
+
+	if in.autonomyCeiling, err = iv.required(
+		fmt.Sprintf("roles.dev.autonomy_ceiling (%s, %s, or %s)", config.CeilingReport, config.CeilingDraftPR, config.CeilingUnattended),
+		validateAutonomyCeiling,
+	); err != nil {
+		return in, err
+	}
+
+	poolSizeStr := iv.withDefaultValidated("runner.pool_size", strconv.Itoa(config.DefaultPoolSize), validateNonNegativeInt)
+	if poolSizeStr != "" {
+		in.poolSize, _ = strconv.Atoi(poolSizeStr) // validated non-negative above
+	}
+
+	maxUSDStr, err := iv.required("budget.max_usd_per_run", validatePositiveUSD)
+	if err != nil {
+		return in, err
+	}
+	in.maxUSDPerRun, _ = strconv.ParseFloat(maxUSDStr, 64) // validated by validatePositiveUSD above
+
+	return in, nil
 }

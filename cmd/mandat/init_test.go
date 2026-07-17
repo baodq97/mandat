@@ -423,3 +423,220 @@ func TestInitCmd_RenderedComments_CoverEveryOmitemptyField(t *testing.T) {
 		})
 	}
 }
+
+// validInteractiveScriptLines returns one scripted answer per
+// runInteractiveInterview prompt, in prompt order, equivalent to
+// validInitArgs' flag values: a full, valid interview from tracker.org
+// through budget.max_usd_per_run. Index 2 is tracker.states.in_progress
+// (blank keeps the default) and index 22 is runner.pool_size (blank keeps
+// the default); tests that exercise those two fields index into this slice
+// directly, so keep it in sync with runInteractiveInterview's prompt order.
+func validInteractiveScriptLines() []string {
+	return []string{
+		"baodo0220",      // tracker.org
+		"mandat-dogfood", // tracker.project
+		"",               // tracker.states.in_progress [Doing]
+		"arc-managed-identity",
+		"d1a7b725-aaaa-bbbb-cccc-dddddddddddd",
+		"blueprint-01",
+		"mandat", // repo key
+		"https://dev.azure.com/baodo0220/mandat-dogfood/_git/mandat",
+		"main", // base_branch
+		"internal/",
+		"cmd/",
+		"", // end remit paths
+		"make check",
+		"npx govkit check",
+		"", // end gates
+		"agent-identity-dev-01",
+		"agent-user-dev-01",
+		"dev-agent@baodo0220.onmicrosoft.com",
+		"agent-identity-reviewer-01",
+		"agent-user-reviewer-01",
+		"reviewer-agent@baodo0220.onmicrosoft.com",
+		"draft-pr",
+		"",  // runner.pool_size [1]
+		"5", // budget.max_usd_per_run
+	}
+}
+
+func newInteractiveScript(lines []string) *strings.Reader {
+	return strings.NewReader(strings.Join(lines, "\n") + "\n")
+}
+
+func TestRunInteractiveInterview_HappyPath_EmitAndReload(t *testing.T) {
+	t.Parallel()
+
+	var transcript strings.Builder
+	in, err := runInteractiveInterview(newInteractiveScript(validInteractiveScriptLines()), &transcript)
+	if err != nil {
+		t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
+	}
+	if err := in.validate(); err != nil {
+		t.Fatalf("in.validate() error = %v, want nil (transcript: %s)", err, transcript.String())
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	var stdout, stderr strings.Builder
+	if code := writeConfig(in, configPath, &stdout, &stderr); code != 0 {
+		t.Fatalf("writeConfig() code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("config.Load(%q) error = %v, want nil", configPath, err)
+	}
+	if cfg.Tracker.Org != "baodo0220" || cfg.Tracker.Project != "mandat-dogfood" {
+		t.Errorf("Tracker = %+v, want org/project from the interview", cfg.Tracker)
+	}
+	if cfg.Tracker.States.InProgress != config.DefaultInProgressState {
+		t.Errorf("Tracker.States.InProgress = %q, want the default %q (blank Enter)", cfg.Tracker.States.InProgress, config.DefaultInProgressState)
+	}
+	if cfg.Auth.Mode != config.AuthArcManagedIdentity {
+		t.Errorf("Auth.Mode = %q, want arc-managed-identity", cfg.Auth.Mode)
+	}
+	if cfg.Entra.Tenant != "d1a7b725-aaaa-bbbb-cccc-dddddddddddd" || cfg.Entra.Blueprint != "blueprint-01" {
+		t.Errorf("Entra = %+v, want tenant/blueprint from the interview", cfg.Entra)
+	}
+
+	repo, ok := cfg.Repos["mandat"]
+	if !ok {
+		t.Fatalf("Repos = %+v, want a %q entry", cfg.Repos, "mandat")
+	}
+	if repo.URL != "https://dev.azure.com/baodo0220/mandat-dogfood/_git/mandat" || repo.BaseBranch != "main" {
+		t.Errorf("Repos[mandat] = %+v, want url/base_branch from the interview", repo)
+	}
+	if got, want := repo.Paths, []string{"internal/", "cmd/"}; !slices.Equal(got, want) {
+		t.Errorf("Repos[mandat].Paths = %v, want %v", got, want)
+	}
+	if got, want := repo.Gates, []string{"make check", "npx govkit check"}; !slices.Equal(got, want) {
+		t.Errorf("Repos[mandat].Gates = %v, want %v", got, want)
+	}
+
+	dev, ok := cfg.Roles["dev"]
+	if !ok {
+		t.Fatalf("Roles = %+v, want a dev entry", cfg.Roles)
+	}
+	if dev.AgentIdentityID != "agent-identity-dev-01" || dev.AgentUserName != "dev-agent@baodo0220.onmicrosoft.com" {
+		t.Errorf("Roles[dev] identity = %+v, want the interview's dev answers", dev)
+	}
+	if dev.AutonomyCeiling != config.CeilingDraftPR {
+		t.Errorf("Roles[dev].AutonomyCeiling = %q, want %q", dev.AutonomyCeiling, config.CeilingDraftPR)
+	}
+
+	reviewer, ok := cfg.Roles["reviewer"]
+	if !ok {
+		t.Fatalf("Roles = %+v, want a reviewer entry", cfg.Roles)
+	}
+	if reviewer.AutonomyCeiling != config.CeilingReport {
+		t.Errorf("Roles[reviewer].AutonomyCeiling = %q, want %q (constant, never prompted)", reviewer.AutonomyCeiling, config.CeilingReport)
+	}
+
+	if cfg.Runner.PoolSize != config.DefaultPoolSize {
+		t.Errorf("Runner.PoolSize = %d, want the default %d (blank Enter)", cfg.Runner.PoolSize, config.DefaultPoolSize)
+	}
+	if cfg.Budget.MaxUSDPerRun != 5 {
+		t.Errorf("Budget.MaxUSDPerRun = %v, want 5", cfg.Budget.MaxUSDPerRun)
+	}
+}
+
+// TestRunInteractiveInterview_EmptyRequiredField_RePrompts proves US-0013
+// AC-13.3(c) bullet 2: a required field left empty re-prompts rather than
+// accepting the blank answer, so the interview never hands validate/render
+// an invalid config.
+func TestRunInteractiveInterview_EmptyRequiredField_RePrompts(t *testing.T) {
+	t.Parallel()
+
+	lines := append([]string{""}, validInteractiveScriptLines()...) // blank answer to the first prompt, tracker.org
+
+	var transcript strings.Builder
+	in, err := runInteractiveInterview(newInteractiveScript(lines), &transcript)
+	if err != nil {
+		t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
+	}
+	if in.trackerOrg != "baodo0220" {
+		t.Errorf("trackerOrg = %q, want %q (the value given after the re-prompt)", in.trackerOrg, "baodo0220")
+	}
+	if !strings.Contains(transcript.String(), "try again") {
+		t.Errorf("transcript = %q, want a re-prompt message after the blank tracker.org answer", transcript.String())
+	}
+}
+
+// TestRunInteractiveInterview_EnterKeepsDefault proves US-0013 AC-13.3(c)
+// bullet 2 for the two applyDefaults fields: the prompt shows the default
+// in brackets, and a blank Enter keeps it, so config.Load resolves the same
+// default value applyDefaults would apply to an omitted field.
+func TestRunInteractiveInterview_EnterKeepsDefault(t *testing.T) {
+	t.Parallel()
+
+	var transcript strings.Builder
+	in, err := runInteractiveInterview(newInteractiveScript(validInteractiveScriptLines()), &transcript)
+	if err != nil {
+		t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
+	}
+	if in.inProgressState != "" {
+		t.Errorf("inProgressState = %q, want empty (blank Enter keeps the built-in default)", in.inProgressState)
+	}
+	if in.poolSize != 0 {
+		t.Errorf("poolSize = %d, want 0 (blank Enter keeps the built-in default)", in.poolSize)
+	}
+	if !strings.Contains(transcript.String(), "["+config.DefaultInProgressState+"]") {
+		t.Errorf("transcript = %q, want the in_progress prompt to show the default %q in brackets", transcript.String(), config.DefaultInProgressState)
+	}
+	if !strings.Contains(transcript.String(), "[1]") {
+		t.Errorf("transcript = %q, want the pool_size prompt to show the default 1 in brackets", transcript.String())
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if code := writeConfig(in, configPath, new(strings.Builder), new(strings.Builder)); code != 0 {
+		t.Fatalf("writeConfig() code = %d, want 0", code)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("config.Load(%q) error = %v, want nil", configPath, err)
+	}
+	if cfg.Tracker.States.InProgress != config.DefaultInProgressState {
+		t.Errorf("Tracker.States.InProgress = %q, want the default %q", cfg.Tracker.States.InProgress, config.DefaultInProgressState)
+	}
+	if cfg.Runner.PoolSize != config.DefaultPoolSize {
+		t.Errorf("Runner.PoolSize = %d, want the default %d", cfg.Runner.PoolSize, config.DefaultPoolSize)
+	}
+}
+
+// TestRunInteractiveInterview_OverridesDefaultedField proves a non-blank
+// answer to a defaulted-field prompt actually overrides it end to end,
+// exercising the else branch TestRunInteractiveInterview_EnterKeepsDefault
+// never touches.
+func TestRunInteractiveInterview_OverridesDefaultedField(t *testing.T) {
+	t.Parallel()
+
+	lines := validInteractiveScriptLines()
+	lines[2] = "InProgress"
+	lines[22] = "3"
+
+	in, err := runInteractiveInterview(newInteractiveScript(lines), new(strings.Builder))
+	if err != nil {
+		t.Fatalf("runInteractiveInterview() error = %v", err)
+	}
+	if in.inProgressState != "InProgress" {
+		t.Errorf("inProgressState = %q, want the entered override %q", in.inProgressState, "InProgress")
+	}
+	if in.poolSize != 3 {
+		t.Errorf("poolSize = %d, want the entered override 3", in.poolSize)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if code := writeConfig(in, configPath, new(strings.Builder), new(strings.Builder)); code != 0 {
+		t.Fatalf("writeConfig() code = %d, want 0", code)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("config.Load(%q) error = %v, want nil", configPath, err)
+	}
+	if cfg.Tracker.States.InProgress != "InProgress" {
+		t.Errorf("Tracker.States.InProgress = %q, want the override %q", cfg.Tracker.States.InProgress, "InProgress")
+	}
+	if cfg.Runner.PoolSize != 3 {
+		t.Errorf("Runner.PoolSize = %d, want the override 3", cfg.Runner.PoolSize)
+	}
+}
