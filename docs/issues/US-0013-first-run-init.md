@@ -148,7 +148,7 @@ config-writing and token-minting stay separate commands, mirroring the `aws conf
       (resolved via `SUDO_USER` per the Design boundary, never root's own
       `~/.config/systemd/user/`); given "no" or the default (unattended) answer, observe no
       unit file is written and no `systemctl` call is made.
-- [ ] AC-13.7 Given a completed `init` run, observe it invokes the same check functions
+- [x] AC-13.7 Given a completed `init` run, observe it invokes the same check functions
       `mandat doctor` runs (`cmd/mandat/doctor.go`'s `claudeVersionCheck`,
       `gitVersionCheck`, `sqliteCheck`, `trackerCheckFor`, `reviewerIdentityCheck`,
       `diskCheck`) against the config it just wrote — no second validator set — and prints
@@ -180,7 +180,7 @@ config-writing and token-minting stay separate commands, mirroring the `aws conf
       in `config.yaml` and asks for confirmation before writing; given `--yes`, observe the
       confirmation is skipped for automation; given a fresh install with no existing file,
       observe the diff shown is the whole file.
-- [ ] AC-13.13 Given a completed `init` run finishes printing the doctor table, observe it
+- [x] AC-13.13 Given a completed `init` run finishes printing the doctor table, observe it
       prints the next command to run and a security note naming the Entra identities and
       remit paths this VM now operates under.
 - [ ] AC-13.14 Given `install.sh` completes, observe it prints the next step

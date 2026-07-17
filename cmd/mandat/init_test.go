@@ -61,8 +61,40 @@ func removeFlag(args []string, name string) []string {
 	return out
 }
 
+// synthPreflight returns a preflightChecks stand-in yielding exactly results,
+// so a finishInit test drives the doctor table and its tri-state exit with no
+// live claude/git/ADO probe (mirrors runChecks' no-live-environment split).
+func synthPreflight(results ...checkResult) func(*config.Config) []func(context.Context) checkResult {
+	return func(*config.Config) []func(context.Context) checkResult {
+		checks := make([]func(context.Context) checkResult, len(results))
+		for i, r := range results {
+			checks[i] = func(context.Context) checkResult { return r }
+		}
+		return checks
+	}
+}
+
+// swapPreflightChecks installs build as init's preflight builder for the test's
+// duration, restoring the production builder on cleanup. A test that swaps it
+// runs non-parallel: preflightChecks is package state and -race rejects a
+// concurrent write.
+func swapPreflightChecks(t *testing.T, build func(*config.Config) []func(context.Context) checkResult) {
+	t.Helper()
+	saved := preflightChecks
+	preflightChecks = build
+	t.Cleanup(func() { preflightChecks = saved })
+}
+
+// stubPassPreflight swaps in an all-PASS synthetic preflight for tests that
+// drive initCmd end to end without asserting on the preflight itself, keeping
+// them hermetic now that a successful init closes with finishInit's doctor run.
+func stubPassPreflight(t *testing.T) {
+	t.Helper()
+	swapPreflightChecks(t, synthPreflight(checkResult{name: "preflight", required: true, ok: true, detail: "stubbed pass"}))
+}
+
 func TestInitCmd_NonInteractive_HappyPathEmitAndReload(t *testing.T) {
-	t.Parallel()
+	stubPassPreflight(t)
 
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	var stdout, stderr strings.Builder
@@ -279,7 +311,7 @@ func replaceFlagValue(args []string, name, value string) []string {
 // without --non-interactive and without hanging on a stdin read, for both a
 // valid flag set and one missing a required flag.
 func TestInitCmd_NonTTYStdin_NeverBlocks(t *testing.T) {
-	t.Parallel()
+	stubPassPreflight(t)
 
 	devNull, err := os.Open(os.DevNull)
 	if err != nil {
@@ -305,8 +337,6 @@ func TestInitCmd_NonTTYStdin_NeverBlocks(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
 			configPath := filepath.Join(t.TempDir(), "config.yaml")
 			done := make(chan int, 1)
 			go func() {
@@ -337,7 +367,7 @@ func TestIsTTY_NonFileReader(t *testing.T) {
 // shape, with Path naming the exact dotted field, not a generic parse
 // failure or a new error type.
 func TestConfigLoad_TruncatedInitOutput_YieldsFieldError(t *testing.T) {
-	t.Parallel()
+	stubPassPreflight(t)
 
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	code := initCmd(validInitArgs(configPath), strings.NewReader(""), new(strings.Builder), new(strings.Builder))
@@ -390,7 +420,7 @@ func TestConfigLoad_TruncatedInitOutput_YieldsFieldError(t *testing.T) {
 // no flag for gets an adjacent comment in the rendered YAML naming its
 // default, its derive rule, or its no-default omission behavior.
 func TestInitCmd_RenderedComments_CoverEveryOmitemptyField(t *testing.T) {
-	t.Parallel()
+	stubPassPreflight(t)
 
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	code := initCmd(validInitArgs(configPath), strings.NewReader(""), new(strings.Builder), new(strings.Builder))
@@ -418,7 +448,6 @@ func TestInitCmd_RenderedComments_CoverEveryOmitemptyField(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.field, func(t *testing.T) {
-			t.Parallel()
 			for _, sub := range tt.wantSub {
 				if !strings.Contains(yamlText, sub) {
 					t.Errorf("rendered config.yaml has no comment for %s: missing %q\n%s", tt.field, sub, yamlText)
@@ -900,7 +929,7 @@ func TestPlaybookTemplate_UnknownRole(t *testing.T) {
 // config, and the written content differs per role (the reviewer's has no push
 // step).
 func TestInitCmd_WritesPerRolePlaybooks(t *testing.T) {
-	t.Parallel()
+	stubPassPreflight(t)
 
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	var stdout, stderr strings.Builder
@@ -923,5 +952,81 @@ func TestInitCmd_WritesPerRolePlaybooks(t *testing.T) {
 	}
 	if strings.Contains(string(reviewer), "push") {
 		t.Errorf("reviewer playbook contains %q, want no push step (AC-13.5)", "push")
+	}
+}
+
+// TestFinishInit_AllPass_PrintsTableAndHandoff proves AC-13.7 + AC-13.13: a
+// completed init closes by running the doctor preflight against the config it
+// just wrote — the identical CHECK/STATUS/DETAIL table, here an injected
+// synthetic PASS check — then prints the handoff naming the next command and,
+// from that config, each role's Entra agent user plus the remit paths this VM
+// now operates under, exiting zero when every check passes.
+func TestFinishInit_AllPass_PrintsTableAndHandoff(t *testing.T) {
+	swapPreflightChecks(t, synthPreflight(checkResult{name: "synthetic", required: true, ok: true, detail: "stubbed pass"}))
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	var stdout, stderr strings.Builder
+	code := initCmd(validInitArgs(configPath), strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("initCmd() code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+
+	out := stdout.String()
+	// The doctor table shape and the injected check rendered PASS (AC-13.7);
+	// the next command and both roles' Entra UPNs plus a remit path (AC-13.13).
+	want := []string{
+		"CHECK", "STATUS", "DETAIL",
+		"synthetic", "PASS",
+		"mandat serve",
+		"dev-agent@baodo0220.onmicrosoft.com",
+		"reviewer-agent@baodo0220.onmicrosoft.com",
+		"internal/",
+	}
+	for _, sub := range want {
+		if !strings.Contains(out, sub) {
+			t.Errorf("finishInit stdout missing %q\n%s", sub, out)
+		}
+	}
+}
+
+// TestFinishInit_RequiredCheckFails_NonZeroButStillPrintsHandoff proves the
+// sharp tri-state (AC-13.7 — flutter doctor's model, not brew doctor's shrug):
+// a required check reporting FAIL makes init exit non-zero, yet the config is
+// still on disk and the handoff (AC-13.13) still prints — the operator needs
+// the security note even to fix the failing check.
+func TestFinishInit_RequiredCheckFails_NonZeroButStillPrintsHandoff(t *testing.T) {
+	swapPreflightChecks(t, synthPreflight(checkResult{name: "synthetic", required: true, ok: false, detail: "stubbed fail"}))
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	var stdout, stderr strings.Builder
+	code := initCmd(validInitArgs(configPath), strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("initCmd() code = 0, want non-zero when a required preflight check FAILs (stderr: %s)", stderr.String())
+	}
+	if _, err := os.Stat(configPath); err != nil {
+		t.Errorf("config not on disk despite a failing preflight: %v (writeConfig runs before finishInit)", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "FAIL") {
+		t.Errorf("finishInit stdout has no FAIL row for the failing required check\n%s", out)
+	}
+	if !strings.Contains(out, "mandat serve") || !strings.Contains(out, "dev-agent@baodo0220.onmicrosoft.com") {
+		t.Errorf("finishInit did not print the handoff after a failing check\n%s", out)
+	}
+}
+
+// TestFinishInit_ConfigLoadError_ReturnsOne proves finishInit's load-error
+// branch: pointed at a path with no config, it reports the error to stderr and
+// returns 1 without reaching the preflight (AC-13.7 runs against the config
+// init wrote — no config, no run).
+func TestFinishInit_ConfigLoadError_ReturnsOne(t *testing.T) {
+	var stdout, stderr strings.Builder
+	code := finishInit(context.Background(), filepath.Join(t.TempDir(), "absent.yaml"), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("finishInit() code = %d, want 1 on a config load error", code)
+	}
+	if !strings.Contains(stderr.String(), "mandat init:") {
+		t.Errorf("stderr = %q, want it to name mandat init and the load error", stderr.String())
 	}
 }

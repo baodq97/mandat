@@ -55,15 +55,22 @@ func doctor(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	checks := []func(context.Context) checkResult{
+	return runChecks(ctx, buildChecks(cfg, *dbPath, *roleName), stdout)
+}
+
+// buildChecks assembles the ordered doctor preflight set. Both doctor and
+// mandat init's closing preflight (init.go) build it here, so there is one
+// validator set, not two: a green init runs the identical checks doctor does
+// against the config it just wrote (US-0013 AC-13.7).
+func buildChecks(cfg *config.Config, dbPath, roleName string) []func(context.Context) checkResult {
+	return []func(context.Context) checkResult{
 		claudeVersionCheck,
 		gitVersionCheck,
-		func(c context.Context) checkResult { return sqliteCheck(c, *dbPath) },
-		trackerCheckFor(cfg, *roleName),
+		func(c context.Context) checkResult { return sqliteCheck(c, dbPath) },
+		trackerCheckFor(cfg, roleName),
 		func(context.Context) checkResult { return reviewerIdentityCheck(cfg) },
-		func(context.Context) checkResult { return diskCheck(*dbPath) },
+		func(context.Context) checkResult { return diskCheck(dbPath) },
 	}
-	return runChecks(ctx, checks, stdout)
 }
 
 // runChecks executes each check, renders the aligned table, and returns the exit

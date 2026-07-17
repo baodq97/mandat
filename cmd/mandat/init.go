@@ -7,9 +7,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -17,6 +19,7 @@ import (
 
 	"github.com/baodq97/mandat/internal/config"
 	"github.com/baodq97/mandat/internal/discovery"
+	"github.com/baodq97/mandat/internal/journal"
 )
 
 // devPlaybookPath and reviewerPlaybookPath are the template-derived paths
@@ -134,7 +137,10 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "mandat init: %v\n", err)
 			return 1
 		}
-		return writeConfig(interviewed, *configPath, stdout, stderr)
+		if code := writeConfig(interviewed, *configPath, stdout, stderr); code != 0 {
+			return code
+		}
+		return finishInit(context.Background(), *configPath, stdout, stderr)
 	}
 
 	in := nonInteractiveInput{
@@ -165,7 +171,10 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	return writeConfig(in, *configPath, stdout, stderr)
+	if code := writeConfig(in, *configPath, stdout, stderr); code != 0 {
+		return code
+	}
+	return finishInit(context.Background(), *configPath, stdout, stderr)
 }
 
 // writeConfig renders in and writes it to configPath, the one emit path
@@ -219,6 +228,46 @@ func writePlaybooks(configPath string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "mandat init: wrote %s\n", path)
 	}
 	return 0
+}
+
+// preflightChecks builds the doctor checks init runs as its closing preflight
+// (AC-13.7). A var so tests inject synthetic checks with no live environment,
+// mirroring runChecks' own split (doctor.go).
+var preflightChecks = func(cfg *config.Config) []func(context.Context) checkResult {
+	return buildChecks(cfg, journal.DefaultPath, "dev")
+}
+
+// finishInit closes a successful init run: it reloads the config init just
+// wrote and runs the same doctor preflight against it (AC-13.7 — one validator
+// set, so a green init is evidence, not a claim; the table's sharp tri-state
+// gates Entra identity and worktree isolation), then prints the operator
+// handoff naming the next command plus the Entra identities and remit paths
+// this VM now operates under (AC-13.13). The handoff prints even when a
+// required check FAILs — the config is on disk and the operator needs the
+// security note to act on it — before finishInit returns the non-zero preflight
+// code.
+func finishInit(ctx context.Context, configPath string, stdout, stderr io.Writer) int {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "mandat init: %v\n", err)
+		return 1
+	}
+
+	code := runChecks(ctx, preflightChecks(cfg), stdout)
+
+	fmt.Fprintf(stdout, "\nNext: run `mandat serve` to poll %s/%s and dispatch assigned work items.\n",
+		cfg.Tracker.Org, cfg.Tracker.Project)
+	fmt.Fprintln(stdout, "\nSecurity note: this VM now acts as these Entra agent identities:")
+	for _, name := range slices.Sorted(maps.Keys(cfg.Roles)) {
+		rc := cfg.Roles[name]
+		fmt.Fprintf(stdout, "  role %s: %s (autonomy ceiling %s)\n", name, rc.AgentUserName, rc.AutonomyCeiling)
+	}
+	fmt.Fprintln(stdout, "Each agent's edits are confined to its remit paths:")
+	for _, name := range slices.Sorted(maps.Keys(cfg.Repos)) {
+		fmt.Fprintf(stdout, "  repo %s: %s\n", name, strings.Join(cfg.Repos[name].Paths, ", "))
+	}
+
+	return code
 }
 
 // isTTY reports whether stdin is a live terminal session. A non-*os.File
