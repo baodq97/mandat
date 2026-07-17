@@ -415,6 +415,68 @@ func TestConfigLoad_TruncatedInitOutput_YieldsFieldError(t *testing.T) {
 	}
 }
 
+// TestConfigLoad_MissingRoleUPN_YieldsDottedFieldError proves AC-13.4 at a
+// nested path, not just the top-level repos/roles case above: a rendered
+// config with roles.dev.agent_user_name blanked (otherwise valid, under the
+// always-on entra.identity_mode: agent-user-pair) still yields the
+// config.ValidationErrors/FieldError shape, with Path naming the exact
+// dotted field and a non-empty Reason stating the fix — not a generic parse
+// failure.
+func TestConfigLoad_MissingRoleUPN_YieldsDottedFieldError(t *testing.T) {
+	stubPassPreflight(t)
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	code := initCmd(validInitArgs(configPath), strings.NewReader(""), new(strings.Builder), new(strings.Builder))
+	if code != 0 {
+		t.Fatalf("initCmd() code = %d, want 0", code)
+	}
+	full, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", configPath, err)
+	}
+
+	// renderRole (init.go) writes this exact line for the dev role's UPN
+	// (validInitArgs' --dev-user-upn); blank its value to simulate init
+	// writing the role block with the UPN omitted.
+	devUPNLine := "    agent_user_name: dev-agent@baodo0220.onmicrosoft.com\n"
+	blanked := strings.Replace(string(full), devUPNLine, "    agent_user_name:\n", 1)
+	if blanked == string(full) {
+		t.Fatal("rendered config has no dev agent_user_name line to blank")
+	}
+	blankedPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(blankedPath, []byte(blanked), 0o600); err != nil {
+		t.Fatalf("write blanked-UPN fixture: %v", err)
+	}
+
+	_, loadErr := config.Load(blankedPath)
+	if loadErr == nil {
+		t.Fatal("config.Load() on a config missing roles.dev.agent_user_name: error = nil, want a validation error")
+	}
+
+	var verrs config.ValidationErrors
+	if !errors.As(loadErr, &verrs) {
+		t.Fatalf("config.Load() error type = %T, want config.ValidationErrors", loadErr)
+	}
+
+	const wantPath = "roles.dev.agent_user_name"
+	found := false
+	for _, fe := range verrs {
+		if fe.Path != wantPath {
+			continue
+		}
+		found = true
+		if len(fe.Reason) == 0 {
+			t.Errorf("FieldError{Path: %q}.Reason is empty, want it to state the fix", wantPath)
+		}
+		if !strings.Contains(fe.Reason, "agent-user-pair") {
+			t.Errorf("FieldError{Path: %q}.Reason = %q, want it to mention agent-user-pair (config.go's identity_mode gate)", wantPath, fe.Reason)
+		}
+	}
+	if !found {
+		t.Errorf("ValidationErrors = %v, want a FieldError with Path %q", verrs, wantPath)
+	}
+}
+
 // TestInitCmd_RenderedComments_CoverEveryOmitemptyField proves AC-13.2 /
 // bullet 4: every omitempty-tagged field in config.go that this slice takes
 // no flag for gets an adjacent comment in the rendered YAML naming its

@@ -114,3 +114,4 @@ $sudo_cmd mv -f "${BIN_DIR}/.mandat.new" "${BIN_DIR}/mandat"
 
 echo "install.sh: installed to ${BIN_DIR}/mandat"
 "${BIN_DIR}/mandat" version
+echo "install.sh: next step: run \`mandat init\` to configure this VM."

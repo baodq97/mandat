@@ -130,7 +130,7 @@ config-writing and token-minting stay separate commands, mirroring the `aws conf
       (only when US-0014's registry finds none to pick from), `roles.<>.autonomy_ceiling`,
       and `budget.max_usd_per_run`. A field found in none of the three categories is a
       defect in this story, not an accepted gap.
-- [ ] AC-13.4 Given `init` writes a config with a missing irreducible field (interview
+- [x] AC-13.4 Given `init` writes a config with a missing irreducible field (interview
       aborted early, or a discovery step failed silently), observe `config.Load` on that
       file returns a `ValidationErrors` value whose `FieldError.Path` names the exact
       dotted field (e.g. `roles.dev.agent_user_name`) and whose `Reason` states the fix,
@@ -183,7 +183,7 @@ config-writing and token-minting stay separate commands, mirroring the `aws conf
 - [x] AC-13.13 Given a completed `init` run finishes printing the doctor table, observe it
       prints the next command to run and a security note naming the Entra identities and
       remit paths this VM now operates under.
-- [ ] AC-13.14 Given `install.sh` completes, observe it prints the next step
+- [x] AC-13.14 Given `install.sh` completes, observe it prints the next step
       (`mandat init`) after running `mandat version`, and observe it never auto-launches
       the init wizard or mutates `config.yaml` itself.
 
