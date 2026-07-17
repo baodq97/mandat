@@ -1,8 +1,8 @@
 ---
 id: PRD-0002
 title: "Board-driven SDLC operating model: the board as operational and ratification surface"
-status: draft
-owner: TBD
+status: review
+owner: baodq97
 date: 2026-07-16
 ---
 
