@@ -230,3 +230,32 @@ Format: `date | what escaped | where it should have been caught | lesson | encod
   stops catching | dev-playbook.md step 4 re-refined to keep `make lint`
   (this arc); #39's one-line t.Helper was fixed at integration and promoted
   (3080c3c); this entry
+- 2026-07-17 | Believed US-0013 was 14/14 ACs done and was about to propose a
+  done-flip; the committed doc showed only 9/14 `[x]`, and three of the five
+  un-ticked ACs (13.1 refuse-to-write, 13.3 config audit, 13.10 env-vars) were
+  genuinely unimplemented, not merely un-marked - the in-conversation summary
+  even claimed AC-13.10 env support that no code ever had. The mandatory
+  pre-flip red-team caught the false premise before the flip | trusting a
+  remembered/summarized belief about what prior slices delivered instead of
+  reading the repo's actual `- [x]/[ ]` state AND grepping the code; a summary
+  asserted completion the commits never shipped | before proposing ANY status
+  advance, verify state on the repo: grep the AC checkboxes and confirm each
+  claimed-done AC has shipping code plus a biting test - never round a
+  remembered "done" up to a flip. Red-team-before-flip is load-bearing exactly
+  here: it converts a false-premise flip into a diagnosed gap | brief drove
+  real implementation of AC-13.1 (slice 12, fa63013) + AC-13.10 (slice 13,
+  64c5b82); a second red-team caught an incomplete AC-13.3 fix + a live-seam
+  kill criterion; closed by a live `mandat init` against baodo0220; US-0013
+  flipped done (12a80ac); this entry
+- 2026-07-17 | Live `mandat init` surfaced that `azCLITokenSource` runs
+  `az account get-access-token --resource <ADO>` WITHOUT `--tenant`, so on a
+  multi-tenant operator machine it silently uses the active az tenant; the
+  dogfood laptop's active tenant was the nois.vn work tenant, and baotest had
+  to be activated before the run would hit baodo0220 (the refuse-gate would
+  otherwise correctly block a wrong-tenant token) | init assumes
+  active-az-session == target tenant, true on a dedicated VM but fragile on a
+  multi-tenant workstation; `entra.tenant` is prompted AFTER discovery, so the
+  tenant is unknown when the discovery token is minted | product follow-up
+  (did not block US-0013): prompt `entra.tenant` first and pin the discovery +
+  validation token to it, removing the active-session dependency. Charter as a
+  small US against US-0013 | recorded here; flagged to owner
