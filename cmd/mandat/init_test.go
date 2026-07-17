@@ -599,7 +599,7 @@ func TestRunInteractiveInterview_HappyPath_EmitAndReload(t *testing.T) {
 	t.Parallel()
 
 	var transcript strings.Builder
-	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(validInteractiveScriptLines()), &transcript, failingTokenSource, unreachableDiscoverer(t))
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(validInteractiveScriptLines()), &transcript, failingTokenSource, unreachableDiscoverer(t), nil)
 	if err != nil {
 		t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
 	}
@@ -681,7 +681,7 @@ func TestRunInteractiveInterview_EmptyRequiredField_RePrompts(t *testing.T) {
 	lines := append([]string{""}, validInteractiveScriptLines()...) // blank answer to the first prompt, tracker.org
 
 	var transcript strings.Builder
-	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(lines), &transcript, failingTokenSource, unreachableDiscoverer(t))
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(lines), &transcript, failingTokenSource, unreachableDiscoverer(t), nil)
 	if err != nil {
 		t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
 	}
@@ -701,7 +701,7 @@ func TestRunInteractiveInterview_EnterKeepsDefault(t *testing.T) {
 	t.Parallel()
 
 	var transcript strings.Builder
-	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(validInteractiveScriptLines()), &transcript, failingTokenSource, unreachableDiscoverer(t))
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(validInteractiveScriptLines()), &transcript, failingTokenSource, unreachableDiscoverer(t), nil)
 	if err != nil {
 		t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
 	}
@@ -745,7 +745,7 @@ func TestRunInteractiveInterview_OverridesDefaultedField(t *testing.T) {
 	lines[2] = "InProgress"
 	lines[22] = "3"
 
-	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(lines), new(strings.Builder), failingTokenSource, unreachableDiscoverer(t))
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(lines), new(strings.Builder), failingTokenSource, unreachableDiscoverer(t), nil)
 	if err != nil {
 		t.Fatalf("runInteractiveInterview() error = %v", err)
 	}
@@ -769,6 +769,119 @@ func TestRunInteractiveInterview_OverridesDefaultedField(t *testing.T) {
 	}
 	if cfg.Runner.PoolSize != 3 {
 		t.Errorf("Runner.PoolSize = %d, want the override 3", cfg.Runner.PoolSize)
+	}
+}
+
+// TestReconstructPriorInput_RoundTrip proves the AC-13.11 byte-identical
+// invariant at the reconstruct↔render seam: an init-written config read back
+// through reconstructPriorInput and re-rendered is byte-for-byte the original,
+// for both a config that SETS the two optional fields
+// (tracker.states.in_progress, runner.pool_size → present as YAML) and one that
+// leaves them at their defaults (commented). The commented case is the
+// load-bearing one — reconstruct must read raw, never config.Load, whose
+// applyDefaults would resolve an omitted optional into a written value and make
+// render emit a field the operator never touched.
+func TestReconstructPriorInput_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	present := validNonInteractiveInput()
+	present.inProgressState = "InReview"
+	present.poolSize = 3
+
+	for _, tc := range []struct {
+		name string
+		in   nonInteractiveInput
+	}{
+		{"optionals commented", validNonInteractiveInput()},
+		{"optionals present", present},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			want := tc.in.render()
+			got, ok := reconstructPriorInput([]byte(want))
+			if !ok {
+				t.Fatal("reconstructPriorInput() ok = false, want true for an init-written config")
+			}
+			if roundTrip := got.render(); roundTrip != want {
+				t.Errorf("reconstruct→render is not byte-identical\n--- want ---\n%s\n--- got ---\n%s", want, roundTrip)
+			}
+		})
+	}
+}
+
+// TestReconstructPriorInput_EmptyReturnsFalse proves the ok contract: an empty
+// or content-free document reconstructs nothing, so initCmd falls back to a
+// fresh interview instead of seeding prompts from an unusable file.
+func TestReconstructPriorInput_EmptyReturnsFalse(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		data string
+	}{
+		{"empty", ""},
+		{"comments only", "# just a header, no fields\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if _, ok := reconstructPriorInput([]byte(tc.data)); ok {
+				t.Errorf("reconstructPriorInput(%q) ok = true, want false", tc.data)
+			}
+		})
+	}
+}
+
+// TestRunInteractiveInterview_Rerun_AllEnter_ByteIdentical proves AC-13.11 end
+// to end: a second interview seeded with a prior config shows each stored value
+// as its bracketed prompt default (property a) and, when the operator changes
+// nothing (a bare Enter through every prompt), reconstructs an input that
+// renders byte-for-byte the file that seeded it (property b) — for both the
+// commented and the present optional-field states. The failing token source and
+// the fatal-on-call discoverer prove a re-run never probes Azure DevOps: the
+// existing config, not discovery, is the source of truth.
+func TestRunInteractiveInterview_Rerun_AllEnter_ByteIdentical(t *testing.T) {
+	t.Parallel()
+
+	present := validNonInteractiveInput()
+	present.inProgressState = "InReview"
+	present.poolSize = 3
+
+	for _, tc := range []struct {
+		name string
+		in   nonInteractiveInput
+	}{
+		{"optionals commented", validNonInteractiveInput()},
+		{"optionals present", present},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			want := tc.in.render()
+			prior, ok := reconstructPriorInput([]byte(want))
+			if !ok {
+				t.Fatal("reconstructPriorInput() ok = false, want true")
+			}
+
+			// One blank line per prompt: a bare Enter through the whole re-run
+			// keeps every default. Keep this count in step with the prompt order
+			// in runInteractiveInterview (the trailing systemd confirm is one).
+			const rerunPromptCount = 21
+			reader := bufio.NewReader(strings.NewReader(strings.Repeat("\n", rerunPromptCount)))
+
+			var transcript strings.Builder
+			got, err := runInteractiveInterview(context.Background(), reader, &transcript, failingTokenSource, unreachableDiscoverer(t), &prior)
+			if err != nil {
+				t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
+			}
+
+			if roundTrip := got.render(); roundTrip != want {
+				t.Errorf("all-Enter re-run is not byte-identical to the prior config\n--- want ---\n%s\n--- got ---\n%s", want, roundTrip)
+			}
+			if bracket := "[" + prior.trackerOrg + "]"; !strings.Contains(transcript.String(), bracket) {
+				t.Errorf("transcript = %q, want the tracker.org prompt to show the prior value %q as a bracketed default", transcript.String(), bracket)
+			}
+		})
 	}
 }
 
@@ -835,7 +948,7 @@ func TestRunInteractiveInterview_DiscoverySuccess_ConfirmProducesLoadableConfig(
 	lines[7] = "" // repo url: accept the discovered value
 
 	var transcript strings.Builder
-	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(lines), &transcript, fakeADOTokenSource(testFakeToken), discovererFor(t, srv))
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(lines), &transcript, fakeADOTokenSource(testFakeToken), discovererFor(t, srv), nil)
 	if err != nil {
 		t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
 	}
@@ -891,7 +1004,7 @@ func TestRunInteractiveInterview_AmbiguousOrg_FallsBackToPrompting(t *testing.T)
 	)
 
 	var transcript strings.Builder
-	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(validInteractiveScriptLines()), &transcript, fakeADOTokenSource(testFakeToken), discovererFor(t, srv))
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(validInteractiveScriptLines()), &transcript, fakeADOTokenSource(testFakeToken), discovererFor(t, srv), nil)
 	if err != nil {
 		t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
 	}
@@ -922,7 +1035,7 @@ func TestRunInteractiveInterview_TokenSourceFailure_FallsBackToPrompting(t *test
 	t.Parallel()
 
 	var transcript strings.Builder
-	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(validInteractiveScriptLines()), &transcript, failingTokenSource, unreachableDiscoverer(t))
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(validInteractiveScriptLines()), &transcript, failingTokenSource, unreachableDiscoverer(t), nil)
 	if err != nil {
 		t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
 	}

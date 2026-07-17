@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/mattn/go-isatty"
+	"gopkg.in/yaml.v3"
 
 	"github.com/baodq97/mandat/internal/config"
 	"github.com/baodq97/mandat/internal/discovery"
@@ -141,7 +142,17 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	reader := bufio.NewReader(stdin)
 
 	if !*nonInteractiveFlag && isTTY(stdin) {
-		interviewed, err := runInteractiveInterview(context.Background(), reader, stdout, azCLITokenSource, productionDiscoverer)
+		// A re-run over an existing config seeds every prompt with the stored
+		// value as its default so an untouched field survives byte-identical
+		// (AC-13.11); a fresh install (no file, or one this reader cannot make
+		// sense of) reconstructs nothing and interviews from discovery/defaults.
+		var prior *nonInteractiveInput
+		if existing, readErr := os.ReadFile(*configPath); readErr == nil {
+			if reconstructed, ok := reconstructPriorInput(existing); ok {
+				prior = &reconstructed
+			}
+		}
+		interviewed, err := runInteractiveInterview(context.Background(), reader, stdout, azCLITokenSource, productionDiscoverer, prior)
 		if err != nil {
 			fmt.Fprintf(stderr, "mandat init: %v\n", err)
 			return 1
@@ -727,6 +738,58 @@ func (iv *interviewer) withDefaultValidated(label, def string, validate func(str
 	}
 }
 
+// requiredWithDefault is required with an existing value offered as the
+// bracketed prompt default (AC-13.11): with def non-empty it shows
+// "label [def]:", a blank Enter returns def unchanged, and a non-blank entry is
+// validated before it replaces def. With def empty it is exactly required, so a
+// re-run passes each prior config value as def while a fresh install passes ""
+// and every field prompts as it always has.
+func (iv *interviewer) requiredWithDefault(label, def string, validate func(string) error) (string, error) {
+	if def == "" {
+		return iv.required(label, validate)
+	}
+	for {
+		value := iv.withDefault(label, def)
+		if value == "" {
+			return def, nil
+		}
+		if validate != nil {
+			if err := validate(value); err != nil {
+				fmt.Fprintf(iv.w, "  %v, try again\n", err)
+				continue
+			}
+		}
+		return value, nil
+	}
+}
+
+// repeatedWithDefault is repeated with an existing list offered as the default
+// (AC-13.11): with def non-empty it echoes the current entries and a bare Enter
+// (an empty first line) keeps the whole list, while any typed line starts
+// collecting a fresh list under repeated's semantics. With def empty it is
+// exactly repeated.
+func (iv *interviewer) repeatedWithDefault(label string, def []string) ([]string, error) {
+	if len(def) == 0 {
+		return iv.repeated(label)
+	}
+	fmt.Fprintf(iv.w, "%s (current: %s; one per line, blank line to keep, or type to replace):\n", label, strings.Join(def, ", "))
+	var values []string
+	for {
+		fmt.Fprint(iv.w, "  > ")
+		value, eof := iv.readLine()
+		if value == "" {
+			if len(values) > 0 {
+				return values, nil
+			}
+			return def, nil
+		}
+		values = append(values, value)
+		if eof {
+			return values, nil
+		}
+	}
+}
+
 // confirm asks a yes/no question defaulting to no: only an explicit y or yes
 // (any case) is true, so a blank Enter — including a closed stdin — or any
 // other answer declines. Used for the systemd-unit install decision (US-0013
@@ -935,6 +998,64 @@ func repoURLsForProject(org discovery.Org, project string) []string {
 	return nil
 }
 
+// reconstructPriorInput reads an existing config.yaml back into the interview's
+// input shape so a re-run can offer each stored value as its prompt default
+// (AC-13.11). It unmarshals raw — never through config.Load — because
+// applyDefaults would resolve an OMITTED optional (a commented
+// tracker.states.in_progress or runner.pool_size) to its default value, and
+// render would then write that field instead of re-emitting the commented
+// block: a field the operator never touched would change on disk. Reading raw
+// keeps an omitted optional at its zero value ("" / 0), the same sentinel
+// render already treats as "stay commented", so an untouched config round-trips
+// byte-for-byte. It reports ok=false for a document that does not parse or
+// carries no real content, so the caller falls back to a fresh interview.
+func reconstructPriorInput(existing []byte) (nonInteractiveInput, bool) {
+	var cfg config.Config
+	if err := yaml.Unmarshal(existing, &cfg); err != nil {
+		return nonInteractiveInput{}, false
+	}
+	if cfg.Tracker.Org == "" && len(cfg.Repos) == 0 {
+		return nonInteractiveInput{}, false
+	}
+
+	in := nonInteractiveInput{
+		trackerOrg:      cfg.Tracker.Org,
+		trackerProject:  cfg.Tracker.Project,
+		inProgressState: cfg.Tracker.States.InProgress,
+		authMode:        string(cfg.Auth.Mode),
+		entraTenant:     cfg.Entra.Tenant,
+		entraBlueprint:  cfg.Entra.Blueprint,
+		poolSize:        cfg.Runner.PoolSize,
+		maxUSDPerRun:    cfg.Budget.MaxUSDPerRun,
+	}
+
+	// An init-written config carries exactly one repo entry; the sorted-first
+	// key keeps reconstruction deterministic if a hand-edit ever added more.
+	if keys := slices.Sorted(maps.Keys(cfg.Repos)); len(keys) > 0 {
+		rc := cfg.Repos[keys[0]]
+		in.repoKey = keys[0]
+		in.repoURL = rc.URL
+		in.repoRaw = keys[0] + "=" + rc.URL
+		in.baseBranch = rc.BaseBranch
+		in.remitPaths = rc.Paths
+		in.gates = rc.Gates
+	}
+
+	if dev, ok := cfg.Roles["dev"]; ok {
+		in.devIdentityID = dev.AgentIdentityID
+		in.devUserID = dev.AgentUserID
+		in.devUserUPN = dev.AgentUserName
+		in.autonomyCeiling = string(dev.AutonomyCeiling)
+	}
+	if reviewer, ok := cfg.Roles["reviewer"]; ok {
+		in.reviewerIdentityID = reviewer.AgentIdentityID
+		in.reviewerUserID = reviewer.AgentUserID
+		in.reviewerUserUPN = reviewer.AgentUserName
+	}
+
+	return in, true
+}
+
 // runInteractiveInterview drives the AC-13.3(c) prompt loop, collecting
 // every irreducible field plus the two applyDefaults fields
 // (tracker.states.in_progress, runner.pool_size) whose prompts show their
@@ -943,102 +1064,164 @@ func repoURLsForProject(org discovery.Org, project string) []string {
 // Whatever it collects flows through the exact same validate/render pair
 // the --non-interactive path uses.
 //
-// Before prompting, it gets a token from getToken and, on success, runs
-// discover for it (US-0013 AC-13.1). A successful discovery prefills
-// tracker.org, tracker.project, and repo url as confirm-or-override
-// defaults (Enter accepts the discovered value); any failure along the way
-// — the token source, or a typed discovery error — falls back to prompting
-// those same fields from scratch, exactly as if discovery had never run.
-func runInteractiveInterview(ctx context.Context, reader *bufio.Reader, out io.Writer, getToken tokenSource, discover discoverer) (nonInteractiveInput, error) {
+// prior is nil for a fresh install and the reconstructed existing config for a
+// re-run (AC-13.11). On a fresh install it gets a token from getToken and, on
+// success, runs discover for it (US-0013 AC-13.1): a successful discovery
+// prefills tracker.org, tracker.project, and repo url as confirm-or-override
+// defaults, and any failure falls back to prompting those fields from scratch.
+// On a re-run the existing config — not a fresh probe — is the source of truth,
+// so discovery is skipped and every prompt instead offers its prior value as
+// the bracketed default; an unchanged field (a blank Enter through all) comes
+// out byte-identical to the file that seeded prior.
+func runInteractiveInterview(ctx context.Context, reader *bufio.Reader, out io.Writer, getToken tokenSource, discover discoverer, prior *nonInteractiveInput) (nonInteractiveInput, error) {
 	iv := &interviewer{r: reader, w: out}
 	var in nonInteractiveInput
 	var err error
 
-	result, discovered := attemptDiscovery(ctx, iv, getToken, discover)
+	// p supplies each field's prior value as its prompt default on a re-run and
+	// the zero value (an empty string — "keep the built-in default") on a fresh
+	// install, so requiredWithDefault degrades to required for a field with no
+	// prior to offer (AC-13.11).
+	var p nonInteractiveInput
+	if prior != nil {
+		p = *prior
+	}
 
-	var orgOptions []string
-	if discovered {
-		orgOptions = []string{result.Org.Name}
-	}
-	if in.trackerOrg, err = iv.confirmOrPrompt("tracker.org", orgOptions); err != nil {
-		return in, err
+	var result discovery.Result
+	var discovered bool
+	if prior == nil {
+		result, discovered = attemptDiscovery(ctx, iv, getToken, discover)
 	}
 
-	var projectOptions []string
-	if discovered {
-		projectOptions = projectNames(result.Org.Projects)
+	if prior != nil {
+		if in.trackerOrg, err = iv.requiredWithDefault("tracker.org", p.trackerOrg, nil); err != nil {
+			return in, err
+		}
+	} else {
+		var orgOptions []string
+		if discovered {
+			orgOptions = []string{result.Org.Name}
+		}
+		if in.trackerOrg, err = iv.confirmOrPrompt("tracker.org", orgOptions); err != nil {
+			return in, err
+		}
 	}
-	if in.trackerProject, err = iv.confirmOrPrompt("tracker.project", projectOptions); err != nil {
-		return in, err
-	}
-	in.inProgressState = iv.withDefault("tracker.states.in_progress", config.DefaultInProgressState)
 
-	if in.authMode, err = iv.required(
-		fmt.Sprintf("auth.mode (%s or %s)", config.AuthArcManagedIdentity, config.AuthClientCertificate), validateAuthMode,
+	if prior != nil {
+		if in.trackerProject, err = iv.requiredWithDefault("tracker.project", p.trackerProject, nil); err != nil {
+			return in, err
+		}
+	} else {
+		var projectOptions []string
+		if discovered {
+			projectOptions = projectNames(result.Org.Projects)
+		}
+		if in.trackerProject, err = iv.confirmOrPrompt("tracker.project", projectOptions); err != nil {
+			return in, err
+		}
+	}
+
+	inProgressDef := config.DefaultInProgressState
+	if prior != nil {
+		inProgressDef = p.inProgressState
+	}
+	in.inProgressState = iv.withDefault("tracker.states.in_progress", inProgressDef)
+	// On a re-run a blank Enter keeps the prior value, whether that was a set
+	// state (re-emit it) or an omitted one (prior.inProgressState == "" → stay
+	// commented); withDefault's own "" return already means the latter on a
+	// fresh install, so this only reassigns when there is a prior to keep.
+	if prior != nil && in.inProgressState == "" {
+		in.inProgressState = p.inProgressState
+	}
+
+	if in.authMode, err = iv.requiredWithDefault(
+		fmt.Sprintf("auth.mode (%s or %s)", config.AuthArcManagedIdentity, config.AuthClientCertificate), p.authMode, validateAuthMode,
 	); err != nil {
 		return in, err
 	}
-	if in.entraTenant, err = iv.required("entra.tenant", nil); err != nil {
+	if in.entraTenant, err = iv.requiredWithDefault("entra.tenant", p.entraTenant, nil); err != nil {
 		return in, err
 	}
-	if in.entraBlueprint, err = iv.required("entra.blueprint", nil); err != nil {
+	if in.entraBlueprint, err = iv.requiredWithDefault("entra.blueprint", p.entraBlueprint, nil); err != nil {
 		return in, err
 	}
 
-	if in.repoKey, err = iv.required("repo key", nil); err != nil {
+	if in.repoKey, err = iv.requiredWithDefault("repo key", p.repoKey, nil); err != nil {
 		return in, err
 	}
-	var repoURLOptions []string
-	if discovered {
-		repoURLOptions = repoURLsForProject(result.Org, in.trackerProject)
-	}
-	if in.repoURL, err = iv.confirmOrPrompt("repo url", repoURLOptions); err != nil {
-		return in, err
+	if prior != nil {
+		if in.repoURL, err = iv.requiredWithDefault("repo url", p.repoURL, nil); err != nil {
+			return in, err
+		}
+	} else {
+		var repoURLOptions []string
+		if discovered {
+			repoURLOptions = repoURLsForProject(result.Org, in.trackerProject)
+		}
+		if in.repoURL, err = iv.confirmOrPrompt("repo url", repoURLOptions); err != nil {
+			return in, err
+		}
 	}
 	in.repoRaw = in.repoKey + "=" + in.repoURL
-	if in.baseBranch, err = iv.required("repo base_branch", nil); err != nil {
+	if in.baseBranch, err = iv.requiredWithDefault("repo base_branch", p.baseBranch, nil); err != nil {
 		return in, err
 	}
-	if in.remitPaths, err = iv.repeated("repo remit path"); err != nil {
+	if in.remitPaths, err = iv.repeatedWithDefault("repo remit path", p.remitPaths); err != nil {
 		return in, err
 	}
-	if in.gates, err = iv.repeated("gate command"); err != nil {
-		return in, err
-	}
-
-	if in.devIdentityID, err = iv.required("roles.dev.agent_identity_id", nil); err != nil {
-		return in, err
-	}
-	if in.devUserID, err = iv.required("roles.dev.agent_user_id", nil); err != nil {
-		return in, err
-	}
-	if in.devUserUPN, err = iv.required("roles.dev.agent_user_name (UPN)", nil); err != nil {
+	if in.gates, err = iv.repeatedWithDefault("gate command", p.gates); err != nil {
 		return in, err
 	}
 
-	if in.reviewerIdentityID, err = iv.required("roles.reviewer.agent_identity_id", nil); err != nil {
+	if in.devIdentityID, err = iv.requiredWithDefault("roles.dev.agent_identity_id", p.devIdentityID, nil); err != nil {
 		return in, err
 	}
-	if in.reviewerUserID, err = iv.required("roles.reviewer.agent_user_id", nil); err != nil {
+	if in.devUserID, err = iv.requiredWithDefault("roles.dev.agent_user_id", p.devUserID, nil); err != nil {
 		return in, err
 	}
-	if in.reviewerUserUPN, err = iv.required("roles.reviewer.agent_user_name (UPN)", nil); err != nil {
+	if in.devUserUPN, err = iv.requiredWithDefault("roles.dev.agent_user_name (UPN)", p.devUserUPN, nil); err != nil {
 		return in, err
 	}
 
-	if in.autonomyCeiling, err = iv.required(
+	if in.reviewerIdentityID, err = iv.requiredWithDefault("roles.reviewer.agent_identity_id", p.reviewerIdentityID, nil); err != nil {
+		return in, err
+	}
+	if in.reviewerUserID, err = iv.requiredWithDefault("roles.reviewer.agent_user_id", p.reviewerUserID, nil); err != nil {
+		return in, err
+	}
+	if in.reviewerUserUPN, err = iv.requiredWithDefault("roles.reviewer.agent_user_name (UPN)", p.reviewerUserUPN, nil); err != nil {
+		return in, err
+	}
+
+	if in.autonomyCeiling, err = iv.requiredWithDefault(
 		fmt.Sprintf("roles.dev.autonomy_ceiling (%s, %s, or %s)", config.CeilingReport, config.CeilingDraftPR, config.CeilingUnattended),
-		validateAutonomyCeiling,
+		p.autonomyCeiling, validateAutonomyCeiling,
 	); err != nil {
 		return in, err
 	}
 
-	poolSizeStr := iv.withDefaultValidated("runner.pool_size", strconv.Itoa(config.DefaultPoolSize), validateNonNegativeInt)
+	poolSizeDef := config.DefaultPoolSize
+	if prior != nil {
+		poolSizeDef = p.poolSize
+	}
+	poolSizeStr := iv.withDefaultValidated("runner.pool_size", strconv.Itoa(poolSizeDef), validateNonNegativeInt)
 	if poolSizeStr != "" {
 		in.poolSize, _ = strconv.Atoi(poolSizeStr) // validated non-negative above
+	} else if prior != nil {
+		// A blank Enter keeps the prior pool_size — a set value re-emits, an
+		// omitted one (0) stays commented, the same round-trip the state field
+		// above makes.
+		in.poolSize = p.poolSize
 	}
 
-	maxUSDStr, err := iv.required("budget.max_usd_per_run", validatePositiveUSD)
+	// budget.max_usd_per_run has no built-in default, so a fresh install prompts
+	// for it required (budgetDef ""); a re-run offers the prior value formatted
+	// the way render writes it, so a blank Enter round-trips the same literal.
+	budgetDef := ""
+	if prior != nil {
+		budgetDef = strconv.FormatFloat(p.maxUSDPerRun, 'f', -1, 64)
+	}
+	maxUSDStr, err := iv.requiredWithDefault("budget.max_usd_per_run", budgetDef, validatePositiveUSD)
 	if err != nil {
 		return in, err
 	}

@@ -172,7 +172,7 @@ config-writing and token-minting stay separate commands, mirroring the `aws conf
       env inputs carry non-secret values only. Env vars feed the interview only: the
       written `config.yaml` remains the sole runtime source, and `mandat serve` never reads
       governed settings (remits, ceilings) from environment variables.
-- [ ] AC-13.11 Given a second `init` run over an existing `/etc/mandat/config.yaml`,
+- [x] AC-13.11 Given a second `init` run over an existing `/etc/mandat/config.yaml`,
       observe each existing value is presented as the bracketed prompt default (Enter keeps
       it), and observe fields the operator does not change come out byte-identical to the
       file before the rerun.
