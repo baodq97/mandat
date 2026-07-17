@@ -1,7 +1,7 @@
 ---
 id: US-0016
 title: Auto-derive first-run config from the az session and Agent-ID registry
-status: open
+status: done
 owner: baodq97
 date: 2026-07-17
 priority: P2

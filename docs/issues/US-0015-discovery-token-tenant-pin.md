@@ -1,7 +1,7 @@
 ---
 id: US-0015
 title: Pin the discovery token to the operator-chosen Entra tenant
-status: open
+status: done
 owner: baodq97
 date: 2026-07-17
 priority: P2

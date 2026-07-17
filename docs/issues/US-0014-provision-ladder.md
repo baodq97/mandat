@@ -1,7 +1,7 @@
 ---
 id: US-0014
 title: Provisioning ladder — `mandat provision` ensure-flows for Entra Agent ID
-status: open
+status: in-progress
 owner: baodq97
 date: 2026-07-16
 priority: P2
