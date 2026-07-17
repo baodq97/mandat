@@ -142,7 +142,7 @@ config-writing and token-minting stay separate commands, mirroring the `aws conf
       ResultContract-write sequence GETTING-STARTED §5 describes; the `reviewer` template
       (`report` autonomy ceiling, Readers group per GETTING-STARTED §3) names a read /
       probe / report sequence and contains no commit or push step.
-- [ ] AC-13.6 Given the operator answers "yes" to installing the systemd unit, observe
+- [x] AC-13.6 Given the operator answers "yes" to installing the systemd unit, observe
       `init` writes a unit file matching the GETTING-STARTED §7 shape (`ExecStart` sourcing
       the env file, `Restart=on-failure`) to the invoking operator's user systemd directory
       (resolved via `SUDO_USER` per the Design boundary, never root's own

@@ -93,6 +93,20 @@ func stubPassPreflight(t *testing.T) {
 	swapPreflightChecks(t, synthPreflight(checkResult{name: "preflight", required: true, ok: true, detail: "stubbed pass"}))
 }
 
+// swapSystemdTarget points init's systemd-unit resolver at home with the CURRENT
+// uid/gid, so writeSystemdUnit's chown-to-self succeeds without root and the unit
+// lands under a t.TempDir() instead of the real operator home. Restores the
+// production resolver on cleanup. A test that swaps it runs non-parallel:
+// systemdTarget is package state and -race rejects a concurrent write.
+func swapSystemdTarget(t *testing.T, home string) {
+	t.Helper()
+	saved := systemdTarget
+	systemdTarget = func() (string, int, int, error) {
+		return filepath.Join(home, ".config/systemd/user"), os.Getuid(), os.Getgid(), nil
+	}
+	t.Cleanup(func() { systemdTarget = saved })
+}
+
 func TestInitCmd_NonInteractive_HappyPathEmitAndReload(t *testing.T) {
 	stubPassPreflight(t)
 
@@ -522,10 +536,11 @@ func TestInitCmd_RenderedComments_CoverEveryOmitemptyField(t *testing.T) {
 // validInteractiveScriptLines returns one scripted answer per
 // runInteractiveInterview prompt, in prompt order, equivalent to
 // validInitArgs' flag values: a full, valid interview from tracker.org
-// through budget.max_usd_per_run. Index 2 is tracker.states.in_progress
-// (blank keeps the default) and index 22 is runner.pool_size (blank keeps
-// the default); tests that exercise those two fields index into this slice
-// directly, so keep it in sync with runInteractiveInterview's prompt order.
+// through budget.max_usd_per_run, closing with a blank (declines the systemd
+// unit, AC-13.6). Index 2 is tracker.states.in_progress (blank keeps the
+// default) and index 22 is runner.pool_size (blank keeps the default); tests
+// that exercise those two fields index into this slice directly, so keep it in
+// sync with runInteractiveInterview's prompt order.
 func validInteractiveScriptLines() []string {
 	return []string{
 		"baodo0220",      // tracker.org
@@ -552,6 +567,7 @@ func validInteractiveScriptLines() []string {
 		"draft-pr",
 		"",  // runner.pool_size [1]
 		"5", // budget.max_usd_per_run
+		"",  // install systemd unit [y/N] — decline
 	}
 }
 
@@ -1014,6 +1030,62 @@ func TestInitCmd_WritesPerRolePlaybooks(t *testing.T) {
 	}
 	if strings.Contains(string(reviewer), "push") {
 		t.Errorf("reviewer playbook contains %q, want no push step (AC-13.5)", "push")
+	}
+}
+
+// TestInitCmd_InstallSystemdUnit_WritesUnitToOperatorHome proves AC-13.6's yes
+// path: with --install-systemd-unit, init writes the GETTING-STARTED §7 unit
+// (ExecStart sourcing the env file, Restart=on-failure) to the operator's
+// ~/.config/systemd/user and prints — never runs — the enable commands.
+func TestInitCmd_InstallSystemdUnit_WritesUnitToOperatorHome(t *testing.T) {
+	stubPassPreflight(t)
+	home := t.TempDir()
+	swapSystemdTarget(t, home)
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	args := append(validInitArgs(configPath), "--install-systemd-unit")
+
+	var stdout, stderr strings.Builder
+	if code := initCmd(args, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("initCmd() code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+
+	unitPath := filepath.Join(home, ".config", "systemd", "user", "mandat.service")
+	got, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", unitPath, err)
+	}
+	unit := string(got)
+	for _, want := range []string{"ExecStart=/bin/sh -c", "set -a; . ", "mandat.env", "serve --config", "Restart=on-failure"} {
+		if !strings.Contains(unit, want) {
+			t.Errorf("systemd unit missing %q\n%s", want, unit)
+		}
+	}
+	if !strings.Contains(stdout.String(), "systemctl --user enable") {
+		t.Errorf("stdout = %q, want the printed (not executed) systemctl enable command", stdout.String())
+	}
+}
+
+// TestInitCmd_NoSystemdUnit_WritesNothing proves AC-13.6's default/no path:
+// without --install-systemd-unit, init writes no unit file and makes no
+// systemctl call.
+func TestInitCmd_NoSystemdUnit_WritesNothing(t *testing.T) {
+	stubPassPreflight(t)
+	home := t.TempDir()
+	swapSystemdTarget(t, home)
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	var stdout, stderr strings.Builder
+	if code := initCmd(validInitArgs(configPath), strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("initCmd() code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+
+	unitPath := filepath.Join(home, ".config", "systemd", "user", "mandat.service")
+	if _, err := os.Stat(unitPath); !os.IsNotExist(err) {
+		t.Errorf("init wrote %s without --install-systemd-unit, want no unit file (err = %v)", unitPath, err)
+	}
+	if strings.Contains(stdout.String(), "systemctl") {
+		t.Errorf("stdout = %q, want no systemctl call attempt on the no-systemd path", stdout.String())
 	}
 }
 

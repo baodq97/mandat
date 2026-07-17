@@ -10,6 +10,7 @@ import (
 	"maps"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -85,6 +86,11 @@ type nonInteractiveInput struct {
 	// interview lets an operator override either.
 	inProgressState string
 	poolSize        int
+
+	// installSystemdUnit is an ACTION toggle, not a config field: it never
+	// enters validate/render (the config schema is unchanged), only gates
+	// whether writeConfig also writes the systemd user unit (US-0013 AC-13.6).
+	installSystemdUnit bool
 }
 
 // initCmd writes /etc/mandat/config.yaml either from operator-supplied
@@ -122,6 +128,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	reviewerUserUPN := fs.String("reviewer-user-upn", "", "reviewer role agent user UPN")
 	autonomyCeiling := fs.String("autonomy-ceiling", "", "dev role autonomy ceiling: report, draft-pr, or unattended")
 	maxUSDPerRun := fs.Float64("max-usd-per-run", 0, "per-run cost ceiling (budget.max_usd_per_run)")
+	installSystemdUnit := fs.Bool("install-systemd-unit", false, "also write a systemd user unit for always-on serve to the operator's ~/.config/systemd/user (default: no unit written)")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -164,6 +171,8 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 		autonomyCeiling: *autonomyCeiling,
 		maxUSDPerRun:    *maxUSDPerRun,
+
+		installSystemdUnit: *installSystemdUnit,
 	}
 
 	if err := in.validate(); err != nil {
@@ -195,6 +204,119 @@ func writeConfig(in nonInteractiveInput, configPath string, stdout, stderr io.Wr
 	if code := writePlaybooks(configPath, stdout, stderr); code != 0 {
 		return code
 	}
+	if in.installSystemdUnit {
+		if code := writeSystemdUnit(in, configPath, stdout, stderr); code != 0 {
+			return code
+		}
+	}
+	return 0
+}
+
+// systemdUnitTemplate is the always-on user unit (GETTING-STARTED §7). ExecStart
+// sources the env file the operator/provision supplies — init does not create it
+// — then exec's this binary's serve. The three %s are env path, binary path, and
+// config path, resolved at write time so the unit points at wherever mandat and
+// its config actually live rather than a hardcoded /usr/local + /etc.
+const systemdUnitTemplate = `[Unit]
+Description=mandat serve
+After=network-online.target
+
+[Service]
+ExecStart=/bin/sh -c 'set -a; . %s; exec %s serve --config %s'
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+`
+
+// systemdTarget resolves where init writes the operator's user unit and who
+// should own it. A var so tests write to a temp home without root; production
+// resolves the sudo-invoking operator via SUDO_USER (never root's own home).
+var systemdTarget = productionSystemdTarget
+
+// productionSystemdTarget resolves the invoking operator's user-unit directory
+// and uid/gid. init runs under sudo (for the root-owned config write), so the
+// operator is SUDO_USER, not root; only with no SUDO_USER (init run directly)
+// does it fall back to the current user.
+func productionSystemdTarget() (string, int, int, error) {
+	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
+		u, err := user.Lookup(sudoUser)
+		if err != nil {
+			return "", 0, 0, fmt.Errorf("look up SUDO_USER %q: %w", sudoUser, err)
+		}
+		uid, err := strconv.Atoi(u.Uid)
+		if err != nil {
+			return "", 0, 0, fmt.Errorf("parse uid %q for SUDO_USER %q: %w", u.Uid, sudoUser, err)
+		}
+		gid, err := strconv.Atoi(u.Gid)
+		if err != nil {
+			return "", 0, 0, fmt.Errorf("parse gid %q for SUDO_USER %q: %w", u.Gid, sudoUser, err)
+		}
+		return filepath.Join(u.HomeDir, ".config/systemd/user"), uid, gid, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", 0, 0, fmt.Errorf("resolve home dir: %w", err)
+	}
+	return filepath.Join(home, ".config/systemd/user"), os.Getuid(), os.Getgid(), nil
+}
+
+// writeSystemdUnit writes the GETTING-STARTED §7 user unit under the operator's
+// ~/.config/systemd/user and chowns it (and any dirs it had to create) back to
+// the operator, so systemctl --user can manage it. It never runs systemctl or
+// loginctl: AC-13.6 requires init to print those commands, not execute them.
+func writeSystemdUnit(_ nonInteractiveInput, configPath string, stdout, stderr io.Writer) int {
+	unitDir, uid, gid, err := systemdTarget()
+	if err != nil {
+		fmt.Fprintf(stderr, "mandat init: resolve systemd unit dir: %v\n", err)
+		return 1
+	}
+
+	// Under sudo MkdirAll would leave the parents it creates root-owned, so the
+	// operator's systemctl --user could not traverse them: record the dirs that
+	// do not yet exist and chown exactly those back to the operator below.
+	var created []string
+	for d := unitDir; ; d = filepath.Dir(d) {
+		if _, statErr := os.Stat(d); statErr == nil {
+			break
+		}
+		created = append(created, d)
+		if parent := filepath.Dir(d); parent == d {
+			break
+		}
+	}
+	if err := os.MkdirAll(unitDir, 0o750); err != nil {
+		fmt.Fprintf(stderr, "mandat init: create %s: %v\n", unitDir, err)
+		return 1
+	}
+
+	unitPath := filepath.Join(unitDir, "mandat.service")
+	envPath := filepath.Join(filepath.Dir(configPath), "mandat.env")
+	binPath, err := os.Executable()
+	if err != nil {
+		binPath = "mandat"
+	}
+	unit := fmt.Sprintf(systemdUnitTemplate, envPath, binPath, configPath)
+	if err := os.WriteFile(unitPath, []byte(unit), 0o644); err != nil { //nolint:gosec // G306: a systemd unit carries no secrets (they live in the sourced env file), deliberately group/other-readable like the playbooks (config alone stays 0o600)
+		fmt.Fprintf(stderr, "mandat init: write %s: %v\n", unitPath, err)
+		return 1
+	}
+
+	for _, target := range append(created, unitPath) {
+		if err := os.Chown(target, uid, gid); err != nil {
+			fmt.Fprintf(stderr, "mandat init: chown %s: %v\n", target, err)
+			return 1
+		}
+	}
+
+	fmt.Fprintf(stdout, "mandat init: wrote %s\n", unitPath)
+	operator := "$USER"
+	if u, lookErr := user.LookupId(strconv.Itoa(uid)); lookErr == nil {
+		operator = u.Username
+	}
+	fmt.Fprintln(stdout, "To enable always-on serve, run these as the operator (not root):")
+	fmt.Fprintf(stdout, "  loginctl enable-linger %s\n", operator)
+	fmt.Fprintln(stdout, "  systemctl --user enable --now mandat.service")
 	return 0
 }
 
@@ -497,6 +619,17 @@ func (iv *interviewer) withDefaultValidated(label, def string, validate func(str
 		}
 		return value
 	}
+}
+
+// confirm asks a yes/no question defaulting to no: only an explicit y or yes
+// (any case) is true, so a blank Enter — including a closed stdin — or any
+// other answer declines. Used for the systemd-unit install decision (US-0013
+// AC-13.6), an action toggle rather than a config field.
+func (iv *interviewer) confirm(label string) bool {
+	fmt.Fprintf(iv.w, "%s [y/N]: ", label)
+	value, _ := iv.readLine()
+	answer := strings.ToLower(value)
+	return answer == "y" || answer == "yes"
 }
 
 // confirmOrPrompt presents options for confirm-or-override (US-0013
@@ -804,6 +937,8 @@ func runInteractiveInterview(ctx context.Context, stdin io.Reader, out io.Writer
 		return in, err
 	}
 	in.maxUSDPerRun, _ = strconv.ParseFloat(maxUSDStr, 64) // validated by validatePositiveUSD above
+
+	in.installSystemdUnit = iv.confirm("install a systemd user unit for always-on serve")
 
 	return in, nil
 }
