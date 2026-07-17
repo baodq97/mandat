@@ -2,10 +2,13 @@ package main
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -13,6 +16,7 @@ import (
 	"github.com/mattn/go-isatty"
 
 	"github.com/baodq97/mandat/internal/config"
+	"github.com/baodq97/mandat/internal/discovery"
 )
 
 // devPlaybookPath and reviewerPlaybookPath are the template-derived paths
@@ -121,7 +125,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	if !*nonInteractiveFlag && isTTY(stdin) {
-		interviewed, err := runInteractiveInterview(stdin, stdout)
+		interviewed, err := runInteractiveInterview(context.Background(), stdin, stdout, azCLITokenSource, productionDiscoverer)
 		if err != nil {
 			fmt.Fprintf(stderr, "mandat init: %v\n", err)
 			return 1
@@ -411,6 +415,26 @@ func (iv *interviewer) withDefaultValidated(label, def string, validate func(str
 	}
 }
 
+// confirmOrPrompt presents options for confirm-or-override (US-0013
+// AC-13.1): with one or more discovered values, Enter accepts options[0]
+// and a non-blank answer overrides it, so a discovered value is never
+// re-typed from scratch. With no options (nothing was discovered, or an
+// override upstream invalidated what was discovered) it falls back to the
+// same iv.required prompt the no-discovery path uses.
+func (iv *interviewer) confirmOrPrompt(label string, options []string) (string, error) {
+	if len(options) == 0 {
+		return iv.required(label, nil)
+	}
+	prompt := label
+	if len(options) > 1 {
+		prompt = fmt.Sprintf("%s (discovered: %s)", label, strings.Join(options, ", "))
+	}
+	if value := iv.withDefault(prompt, options[0]); value != "" {
+		return value, nil
+	}
+	return options[0], nil
+}
+
 // repeated collects a repeatable field (remit paths, gate commands): one
 // entry per line, a blank line ends the list. At least one entry is
 // required; a blank first line re-prompts instead of accepting an empty
@@ -478,6 +502,116 @@ func validateNonNegativeInt(v string) error {
 	return nil
 }
 
+// adoResourceID is the Azure DevOps resource GUID az account get-access-token
+// requests a bearer token for; it is pinned across every ADO REST call
+// discovery.Client makes (see internal/discovery).
+const adoResourceID = "499b84ac-1321-427f-aa17-267ca6975798"
+
+// tokenSource obtains a bearer token for the ADO resource. It is a func
+// field, not a hardcoded az invocation, so a test supplies a fake token with
+// no az call (US-0013 AC-13.1).
+type tokenSource func(ctx context.Context) (string, error)
+
+// azCLITokenSource is the production tokenSource: it shells out to the az
+// CLI. When az is missing or the operator isn't logged in, the command fails
+// fast (it never prompts or blocks waiting for an interactive login), so the
+// caller's fallback to manual entry runs immediately, not after a hang.
+func azCLITokenSource(ctx context.Context) (string, error) {
+	out, err := exec.CommandContext(ctx, "az", "account", "get-access-token",
+		"--resource", adoResourceID, "--query", "accessToken", "-o", "tsv").Output()
+	if err != nil {
+		return "", fmt.Errorf("az account get-access-token: %w", err)
+	}
+	token := strings.TrimSpace(string(out))
+	if token == "" {
+		return "", errors.New("az account get-access-token returned no token")
+	}
+	return token, nil
+}
+
+// discoverer runs the discovery chain for token. It is a func field so a
+// test points it at an httptest server through discovery.Config instead of
+// the real Azure DevOps hosts.
+type discoverer func(ctx context.Context, token string) (discovery.Result, error)
+
+// productionDiscoverer is the discoverer initCmd wires up outside tests: a
+// discovery.Client built with the default (production) host config.
+func productionDiscoverer(ctx context.Context, token string) (discovery.Result, error) {
+	c, err := discovery.New(discovery.Config{})
+	if err != nil {
+		return discovery.Result{}, err
+	}
+	return c.Discover(ctx, token)
+}
+
+// attemptDiscovery gets a token via getToken and, on success, runs discover
+// for it. Any failure — the token source itself, or a typed discovery error
+// (ErrNoOrgReachable, AmbiguousOrgError, APIError, or a transport error) —
+// prints one diagnostic line to iv.w and reports ok=false; discovery is
+// best-effort prefill, never a hard requirement, so this never returns an
+// error itself, and the caller always has a path forward (prompt from
+// scratch through the same helpers the no-discovery path uses).
+func attemptDiscovery(ctx context.Context, iv *interviewer, getToken tokenSource, discover discoverer) (result discovery.Result, ok bool) {
+	token, err := getToken(ctx)
+	if err != nil {
+		fmt.Fprintf(iv.w, "note: could not obtain an Azure DevOps token (%v); falling back to manual entry\n", err)
+		return discovery.Result{}, false
+	}
+
+	result, err = discover(ctx, token)
+	if err != nil {
+		fmt.Fprintf(iv.w, "note: Azure DevOps discovery failed (%s); falling back to manual entry\n", discoveryFailureReason(err))
+		return discovery.Result{}, false
+	}
+	return result, true
+}
+
+// discoveryFailureReason renders err using the typed distinctions discovery
+// gives its four outcomes (errors.Is/As), so attemptDiscovery's one-line note
+// names what went wrong instead of a flattened error string.
+func discoveryFailureReason(err error) string {
+	var amb *discovery.AmbiguousOrgError
+	var apiErr *discovery.APIError
+	switch {
+	case errors.Is(err, discovery.ErrNoOrgReachable):
+		return "the token has access to no Azure DevOps organization"
+	case errors.As(err, &amb):
+		return fmt.Sprintf("the token has access to more than one organization: %s", strings.Join(amb.Orgs, ", "))
+	case errors.As(err, &apiErr):
+		return fmt.Sprintf("Azure DevOps returned status %d", apiErr.Status)
+	default:
+		return err.Error()
+	}
+}
+
+// projectNames returns projects' names in order, for the tracker.project
+// confirm-or-override prompt's discovered-options list.
+func projectNames(projects []discovery.Project) []string {
+	names := make([]string, len(projects))
+	for i, p := range projects {
+		names[i] = p.Name
+	}
+	return names
+}
+
+// repoURLsForProject returns the remote clone URLs of project's repositories
+// within org, or nil if org has no project by that name — which happens when
+// the operator overrode tracker.project to a value discovery didn't find, so
+// the repo url prompt below correctly falls back to manual entry too.
+func repoURLsForProject(org discovery.Org, project string) []string {
+	for _, p := range org.Projects {
+		if p.Name != project {
+			continue
+		}
+		urls := make([]string, len(p.Repositories))
+		for i, r := range p.Repositories {
+			urls[i] = r.RemoteURL
+		}
+		return urls
+	}
+	return nil
+}
+
 // runInteractiveInterview drives the AC-13.3(c) prompt loop, collecting
 // every irreducible field plus the two applyDefaults fields
 // (tracker.states.in_progress, runner.pool_size) whose prompts show their
@@ -485,15 +619,33 @@ func validateNonNegativeInt(v string) error {
 // never prompted: nonInteractiveInput and render already supply them.
 // Whatever it collects flows through the exact same validate/render pair
 // the --non-interactive path uses.
-func runInteractiveInterview(stdin io.Reader, out io.Writer) (nonInteractiveInput, error) {
+//
+// Before prompting, it gets a token from getToken and, on success, runs
+// discover for it (US-0013 AC-13.1). A successful discovery prefills
+// tracker.org, tracker.project, and repo url as confirm-or-override
+// defaults (Enter accepts the discovered value); any failure along the way
+// — the token source, or a typed discovery error — falls back to prompting
+// those same fields from scratch, exactly as if discovery had never run.
+func runInteractiveInterview(ctx context.Context, stdin io.Reader, out io.Writer, getToken tokenSource, discover discoverer) (nonInteractiveInput, error) {
 	iv := &interviewer{r: bufio.NewReader(stdin), w: out}
 	var in nonInteractiveInput
 	var err error
 
-	if in.trackerOrg, err = iv.required("tracker.org", nil); err != nil {
+	result, discovered := attemptDiscovery(ctx, iv, getToken, discover)
+
+	var orgOptions []string
+	if discovered {
+		orgOptions = []string{result.Org.Name}
+	}
+	if in.trackerOrg, err = iv.confirmOrPrompt("tracker.org", orgOptions); err != nil {
 		return in, err
 	}
-	if in.trackerProject, err = iv.required("tracker.project", nil); err != nil {
+
+	var projectOptions []string
+	if discovered {
+		projectOptions = projectNames(result.Org.Projects)
+	}
+	if in.trackerProject, err = iv.confirmOrPrompt("tracker.project", projectOptions); err != nil {
 		return in, err
 	}
 	in.inProgressState = iv.withDefault("tracker.states.in_progress", config.DefaultInProgressState)
@@ -513,7 +665,11 @@ func runInteractiveInterview(stdin io.Reader, out io.Writer) (nonInteractiveInpu
 	if in.repoKey, err = iv.required("repo key", nil); err != nil {
 		return in, err
 	}
-	if in.repoURL, err = iv.required("repo url", nil); err != nil {
+	var repoURLOptions []string
+	if discovered {
+		repoURLOptions = repoURLsForProject(result.Org, in.trackerProject)
+	}
+	if in.repoURL, err = iv.confirmOrPrompt("repo url", repoURLOptions); err != nil {
 		return in, err
 	}
 	in.repoRaw = in.repoKey + "=" + in.repoURL

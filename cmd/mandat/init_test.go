@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,6 +13,7 @@ import (
 	"time"
 
 	"github.com/baodq97/mandat/internal/config"
+	"github.com/baodq97/mandat/internal/discovery"
 )
 
 // validInitArgs returns a full, valid --non-interactive flag set: every
@@ -464,11 +468,30 @@ func newInteractiveScript(lines []string) *strings.Reader {
 	return strings.NewReader(strings.Join(lines, "\n") + "\n")
 }
 
+// failingTokenSource simulates az missing or the operator not being logged
+// in, so every test exercising the manual-entry interview flow does so
+// deterministically, with no real az invocation and no dependence on the
+// test host's environment (US-0013 AC-13.1).
+func failingTokenSource(context.Context) (string, error) {
+	return "", errors.New("az: command not found")
+}
+
+// unreachableDiscoverer fails a test if the interview ever calls discover
+// after its token source already failed: discovery is only attempted with a
+// token in hand.
+func unreachableDiscoverer(t *testing.T) discoverer {
+	t.Helper()
+	return func(context.Context, string) (discovery.Result, error) {
+		t.Fatal("discoverer called despite a failed token source")
+		return discovery.Result{}, nil
+	}
+}
+
 func TestRunInteractiveInterview_HappyPath_EmitAndReload(t *testing.T) {
 	t.Parallel()
 
 	var transcript strings.Builder
-	in, err := runInteractiveInterview(newInteractiveScript(validInteractiveScriptLines()), &transcript)
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(validInteractiveScriptLines()), &transcript, failingTokenSource, unreachableDiscoverer(t))
 	if err != nil {
 		t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
 	}
@@ -550,7 +573,7 @@ func TestRunInteractiveInterview_EmptyRequiredField_RePrompts(t *testing.T) {
 	lines := append([]string{""}, validInteractiveScriptLines()...) // blank answer to the first prompt, tracker.org
 
 	var transcript strings.Builder
-	in, err := runInteractiveInterview(newInteractiveScript(lines), &transcript)
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(lines), &transcript, failingTokenSource, unreachableDiscoverer(t))
 	if err != nil {
 		t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
 	}
@@ -570,7 +593,7 @@ func TestRunInteractiveInterview_EnterKeepsDefault(t *testing.T) {
 	t.Parallel()
 
 	var transcript strings.Builder
-	in, err := runInteractiveInterview(newInteractiveScript(validInteractiveScriptLines()), &transcript)
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(validInteractiveScriptLines()), &transcript, failingTokenSource, unreachableDiscoverer(t))
 	if err != nil {
 		t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
 	}
@@ -614,7 +637,7 @@ func TestRunInteractiveInterview_OverridesDefaultedField(t *testing.T) {
 	lines[2] = "InProgress"
 	lines[22] = "3"
 
-	in, err := runInteractiveInterview(newInteractiveScript(lines), new(strings.Builder))
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(lines), new(strings.Builder), failingTokenSource, unreachableDiscoverer(t))
 	if err != nil {
 		t.Fatalf("runInteractiveInterview() error = %v", err)
 	}
@@ -638,5 +661,178 @@ func TestRunInteractiveInterview_OverridesDefaultedField(t *testing.T) {
 	}
 	if cfg.Runner.PoolSize != 3 {
 		t.Errorf("Runner.PoolSize = %d, want the override 3", cfg.Runner.PoolSize)
+	}
+}
+
+// fakeADOServer serves the four discovery endpoints from canned JSON bodies,
+// standing in for Azure DevOps so these tests never dial a real host
+// (US-0013 AC-13.1).
+func fakeADOServer(t *testing.T, profileBody, accountsBody, projectsBody, reposBody string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/_apis/profile/profiles/me"):
+			_, _ = w.Write([]byte(profileBody))
+		case strings.HasSuffix(r.URL.Path, "/_apis/accounts"):
+			_, _ = w.Write([]byte(accountsBody))
+		case strings.HasSuffix(r.URL.Path, "/_apis/projects"):
+			_, _ = w.Write([]byte(projectsBody))
+		case strings.HasSuffix(r.URL.Path, "/_apis/git/repositories"):
+			_, _ = w.Write([]byte(reposBody))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// discovererFor builds a discoverer bound to srv, standing in for
+// productionDiscoverer in tests.
+func discovererFor(t *testing.T, srv *httptest.Server) discoverer {
+	t.Helper()
+	c, err := discovery.New(discovery.Config{VSSPSBaseURL: srv.URL, AzureDevOpsBaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("discovery.New() error = %v", err)
+	}
+	return c.Discover
+}
+
+// fakeADOTokenSource always returns token with no az invocation.
+func fakeADOTokenSource(token string) tokenSource {
+	return func(context.Context) (string, error) {
+		return token, nil
+	}
+}
+
+// TestRunInteractiveInterview_DiscoverySuccess_ConfirmProducesLoadableConfig
+// proves US-0013 AC-13.1: a successful discovery prefills
+// tracker.org, tracker.project, and repo url, Enter accepts each discovered
+// value without re-typing it, and the confirmed values flow through the
+// same writeConfig/render path into a config.Load-acceptable file.
+func TestRunInteractiveInterview_DiscoverySuccess_ConfirmProducesLoadableConfig(t *testing.T) {
+	t.Parallel()
+
+	srv := fakeADOServer(t,
+		`{"id":"11111111-0000-4000-8000-000000000001"}`,
+		`{"count":1,"value":[{"accountId":"22222222-0000-4000-8000-000000000002","accountName":"baodo0220"}]}`,
+		`{"count":1,"value":[{"id":"33333333-0000-4000-8000-000000000003","name":"mandat-pilot"}]}`,
+		`{"count":1,"value":[{"id":"44444444-0000-4000-8000-000000000004","name":"mandat","remoteUrl":"https://dev.azure.com/baodo0220/mandat-pilot/_git/mandat"}]}`,
+	)
+
+	lines := validInteractiveScriptLines()
+	lines[0] = "" // tracker.org: accept the discovered value
+	lines[1] = "" // tracker.project: accept the discovered value
+	lines[7] = "" // repo url: accept the discovered value
+
+	var transcript strings.Builder
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(lines), &transcript, fakeADOTokenSource(testFakeToken), discovererFor(t, srv))
+	if err != nil {
+		t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
+	}
+	if err := in.validate(); err != nil {
+		t.Fatalf("in.validate() error = %v, want nil (transcript: %s)", err, transcript.String())
+	}
+	if in.trackerOrg != "baodo0220" {
+		t.Errorf("trackerOrg = %q, want the discovered org %q", in.trackerOrg, "baodo0220")
+	}
+	if in.trackerProject != "mandat-pilot" {
+		t.Errorf("trackerProject = %q, want the discovered project %q", in.trackerProject, "mandat-pilot")
+	}
+	if in.repoURL != "https://dev.azure.com/baodo0220/mandat-pilot/_git/mandat" {
+		t.Errorf("repoURL = %q, want the discovered remote url", in.repoURL)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	var stdout, stderr strings.Builder
+	if code := writeConfig(in, configPath, &stdout, &stderr); code != 0 {
+		t.Fatalf("writeConfig() code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("config.Load(%q) error = %v, want nil", configPath, err)
+	}
+	if cfg.Tracker.Org != "baodo0220" || cfg.Tracker.Project != "mandat-pilot" {
+		t.Errorf("Tracker = %+v, want the confirmed discovered org/project", cfg.Tracker)
+	}
+	repo, ok := cfg.Repos["mandat"]
+	if !ok || repo.URL != "https://dev.azure.com/baodo0220/mandat-pilot/_git/mandat" {
+		t.Errorf("Repos[mandat] = %+v, want the confirmed discovered remote url", cfg.Repos)
+	}
+}
+
+// testFakeToken is the bearer token fakeADOTokenSource hands the discoverer in
+// tests; it is never sent to a real host, only to fakeADOServer.
+const testFakeToken = "fake-bearer-token"
+
+// TestRunInteractiveInterview_AmbiguousOrg_FallsBackToPrompting proves
+// US-0013 AC-13.1: a typed AmbiguousOrgError falls back to prompting for
+// org (and, since discovery never reached project/repo, those too) through
+// the same manual prompts the no-discovery path uses.
+func TestRunInteractiveInterview_AmbiguousOrg_FallsBackToPrompting(t *testing.T) {
+	t.Parallel()
+
+	srv := fakeADOServer(t,
+		`{"id":"11111111-0000-4000-8000-000000000001"}`,
+		`{"count":2,"value":[
+			{"accountId":"aaaaaaaa-0000-4000-8000-000000000001","accountName":"baodo0220"},
+			{"accountId":"bbbbbbbb-0000-4000-8000-000000000002","accountName":"other-org"}
+		]}`,
+		"", "",
+	)
+
+	var transcript strings.Builder
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(validInteractiveScriptLines()), &transcript, fakeADOTokenSource(testFakeToken), discovererFor(t, srv))
+	if err != nil {
+		t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
+	}
+	if !strings.Contains(transcript.String(), "note:") || !strings.Contains(transcript.String(), "more than one organization") {
+		t.Errorf("transcript = %q, want a one-line note naming the ambiguous-org failure", transcript.String())
+	}
+	if in.trackerOrg != "baodo0220" {
+		t.Errorf("trackerOrg = %q, want the manually typed %q", in.trackerOrg, "baodo0220")
+	}
+
+	if err := in.validate(); err != nil {
+		t.Fatalf("in.validate() error = %v, want nil (transcript: %s)", err, transcript.String())
+	}
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if code := writeConfig(in, configPath, new(strings.Builder), new(strings.Builder)); code != 0 {
+		t.Fatalf("writeConfig() code = %d, want 0", code)
+	}
+	if _, err := config.Load(configPath); err != nil {
+		t.Fatalf("config.Load(%q) error = %v, want nil", configPath, err)
+	}
+}
+
+// TestRunInteractiveInterview_TokenSourceFailure_FallsBackToPrompting proves
+// US-0013 AC-13.1: a token source failure prints a one-line note and
+// falls back to the full manual prompt path, with the discoverer never
+// invoked (no az call, no network call, of any kind).
+func TestRunInteractiveInterview_TokenSourceFailure_FallsBackToPrompting(t *testing.T) {
+	t.Parallel()
+
+	var transcript strings.Builder
+	in, err := runInteractiveInterview(context.Background(), newInteractiveScript(validInteractiveScriptLines()), &transcript, failingTokenSource, unreachableDiscoverer(t))
+	if err != nil {
+		t.Fatalf("runInteractiveInterview() error = %v (transcript: %s)", err, transcript.String())
+	}
+	if !strings.Contains(transcript.String(), "note:") {
+		t.Errorf("transcript = %q, want a one-line note about the token source failure", transcript.String())
+	}
+	if in.trackerOrg != "baodo0220" || in.trackerProject != "mandat-dogfood" {
+		t.Errorf("in = %+v, want the manually typed org/project from the fallback prompts", in)
+	}
+
+	if err := in.validate(); err != nil {
+		t.Fatalf("in.validate() error = %v, want nil (transcript: %s)", err, transcript.String())
+	}
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if code := writeConfig(in, configPath, new(strings.Builder), new(strings.Builder)); code != 0 {
+		t.Fatalf("writeConfig() code = %d, want 0", code)
+	}
+	if _, err := config.Load(configPath); err != nil {
+		t.Fatalf("config.Load(%q) error = %v, want nil", configPath, err)
 	}
 }
