@@ -116,9 +116,17 @@ separation the CLI survey documents (patterns 1, 11).
       principal (it is intrinsic), correcting the earlier premise that it needed consent.
 - [ ] AC-14.4 Given the operator's session lacks admin-consent rights for the ADO
       `oauth2PermissionGrant` step, or lacks ADO org-admin rights for the entitlement/group
-      step, observe `ensure-role-identity` does not fail opaquely: it prints the exact call
+      step, observe `--ensure-role` does not fail opaquely: it prints the exact call
       (method, endpoint, request body) an admin must run to complete that step, and continues
-      the remaining steps of the ladder rather than aborting.
+      the remaining steps of the ladder rather than aborting. Shipped: step 6 (the delegated
+      `user_impersonation` grant on the resolved Azure DevOps SP, `consentType: Principal`) is
+      attempted on the operator's own delegated session and, on a 403, prints the exact
+      admin-consent POST and continues; step 7 (the ADO org-admin `vsaex` user entitlement +
+      Contributors group add) is always printed for the ADO admin to run, since it crosses to
+      the ADO REST surface (a different host and token) the design keeps manual. Neither aborts
+      the identity + user provisioning. The whole flow (real registry read, live ADO SP
+      resolution to the per-tenant resourceId, both step 6 and 7 call shapes) was smoke-tested
+      live 2026-07-18 under `--dry-run` against the dogfood tenant and org, zero writes.
 - [ ] AC-14.5 Given the ADO entitlement call immediately follows agent-user creation and
       returns a transient failure, observe `ensure-role-identity` retries with backoff before
       surfacing failure: the propagation-lag gap the research doc documents from the dogfood
@@ -129,7 +137,11 @@ separation the CLI survey documents (patterns 1, 11).
 - [ ] AC-14.7 Given any `ensure-*` step is about to issue a Graph or ADO write call, observe
       the exact call (endpoint and body, secrets redacted) is printed before it is issued. This
       extends US-0013 AC-13.12's diff-before-write stance, applied there to `config.yaml`,
-      to tenant mutations, which carry higher stakes than a file write.
+      to tenant mutations, which carry higher stakes than a file write. One field is
+      necessarily resolved at issue time: when the paired-user create follows a fresh identity
+      create, the printed user body shows a labelled placeholder for `identityParentId` (the
+      identity id does not exist until its create returns) and the issued body carries the real
+      id; the endpoint and every other field are exact.
 - [ ] AC-14.8 Given a completed `provision` run, observe no Graph token, Azure CLI token, or
       blueprint client secret is written to `config.yaml`, any file under `/etc/mandat/`, or
       any other disk location; only non-secret identifiers (tenant id, blueprint `appId`,
@@ -180,7 +192,38 @@ story.
   (e.g. `contoso.onmicrosoft.com`) and the user's userPrincipalName is `<role>@<domain>`.
   Auto-deriving the domain from the tenant's default verified domain remains a follow-up, not
   a blocker — an explicit flag is the honest MVP.
-- Still open for a complete ladder: AC-14.4's ADO steps 6–7 (the `oauth2PermissionGrant`
-  admin consent and the ADO entitlement/group add). `--ensure-role` covers the Graph identity
-  + user creation only; the ADO grant/entitlement steps are not yet wired. (AC-14.1 ensure-auth
-  and the UPN-domain question are now resolved.)
+- The full ladder is now wired end to end: ensure-auth (AC-14.1), ensure-blueprint (AC-14.2),
+  ensure-role identity + user (AC-14.3), and the ADO grant + entitlement (AC-14.4, steps 6–7).
+  Remaining follow-ups, none blocking: step 7's `vsaex` entitlement is printed for the ADO
+  admin, not attempted (wiring the ADO REST attempt is a separate slice); the FIC/Arc
+  zero-secret credential (step 3) is deferred to a subscription-backed production tenant the
+  dogfood tenant cannot host; and auto-deriving the UPN domain from the tenant's default
+  verified domain (today an explicit `--upn-domain`) is optional polish. A pre-existing
+  `deriveSponsor` bug — passing `--subscription` to `az ad signed-in-user show`, which rejects
+  it (exit 2) — was surfaced by the live smoke and fixed (`az ad` follows the login context and
+  cannot be pinned; the operator has the target tenant active via ensure-auth, or passes
+  --sponsor).
+
+### Open findings before a `done` flip (red-team, 2026-07-18)
+
+An independent red-team pass on the `in-progress → done` proposal found the story is not yet
+clean-done. Ranked, for the owner's ruling — none blocks the shipped code, all are AC-fidelity:
+
+- **F1 (owner ruling needed).** AC-14.2 / Scope item 2 promise a role **precondition that fails
+  before any write**. The shipped `EnsureBlueprint` instead attempts the create POST and maps a
+  403 to a typed `PrivilegeError` + named-role hint (the "never a raw 403" half is met; the
+  "before any write" half is not). Resolve by either re-scoping AC-14.2 to the typed-error
+  stance the code implements, or building the pre-flight role read. Owner decides re-scope vs.
+  rework.
+- **F2 (kill criterion).** AC-14.2's blueprint-**create** branch is still unexercised live (the
+  same open spike as the first Gap above): every live proof to date covers identity/user under
+  an already-owned blueprint. Run `--ensure-blueprint` against a tenant with **no** blueprint as
+  the intended operator. If an az-minted token cannot authorize blueprint-create at all, AC-14.2
+  must be re-scoped (blueprint creation becomes a documented manual prerequisite), which would
+  break the "one command collapses the ceremony" thesis at its first rung — this is the flip's
+  abandon-vs-patch line.
+- **F4.** Step 6's real 403 → print-for-admin path was live-exercised only under `--dry-run`
+  (which returns before the grant attempt); the non-dry-run privilege-gap path is unit-tested,
+  not yet live-proven. Needs a no-rights operator to settle.
+- Refuted by the same pass (not gaps): step 7 being print-only satisfies AC-14.4 by design
+  (the ADO REST surface stays manual); all cited Sources exist on disk.

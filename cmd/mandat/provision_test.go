@@ -41,6 +41,10 @@ type fakeGraphServer struct {
 	userCreateStatus int
 	userCreateBody   string
 
+	spByAppIDBody     string // GET servicePrincipals(appId='...') — the ADO SP resolve (step 6)
+	grantsBody        string // GET oauth2PermissionGrants?$filter=... — existing grants (step 6 idempotency)
+	grantCreateStatus int    // status for POST oauth2PermissionGrants (0 → 201)
+
 	blueprintCreateStatus int
 	blueprintCreateBody   string
 	principalCreateStatus int
@@ -84,6 +88,24 @@ func (f *fakeGraphServer) start(t *testing.T) *httptest.Server {
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/servicePrincipals/microsoft.graph.agentIdentity"):
 			w.WriteHeader(f.createStatus)
 			_, _ = w.Write([]byte(f.createBody))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/oauth2PermissionGrants"):
+			st := f.grantCreateStatus
+			if st == 0 {
+				st = http.StatusCreated
+			}
+			w.WriteHeader(st)
+		case strings.HasSuffix(r.URL.Path, "/oauth2PermissionGrants"):
+			body := f.grantsBody
+			if body == "" {
+				body = `{"value":[]}`
+			}
+			_, _ = w.Write([]byte(body))
+		case strings.Contains(r.URL.Path, "servicePrincipals(appId="):
+			if f.spByAppIDBody == "" {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write([]byte(f.spByAppIDBody))
 		case r.Method == http.MethodDelete:
 			w.WriteHeader(f.deleteStatus)
 			_, _ = w.Write([]byte(f.deleteBody))
@@ -131,6 +153,7 @@ func dogfoodGraphServer() *fakeGraphServer {
 		blueprintsBody: `{"value":[{"id":"bp-object-01","appId":"appid-blueprint-01","displayName":"mandat-spike-blueprint"}]}`,
 		identitiesBody: `{"value":[{"id":"identity-dev-01","displayName":"mandat-spike-dev"}]}`,
 		usersBody:      `{"value":[{"id":"user-dev-01","displayName":"mandat-spike-dev-user","userPrincipalName":"dev@baotest.onmicrosoft.com","identityParentId":"identity-dev-01"}]}`,
+		spByAppIDBody:  `{"id":"ado-sp-object-01","appId":"499b84ac-1321-427f-aa17-267ca6975798"}`,
 	}
 }
 
@@ -739,24 +762,31 @@ func TestProvision_EnsureRole_CreatesIdentityAndUserAsBlueprint(t *testing.T) {
 	}
 
 	out := stdout.String()
-	for _, want := range []string{"created agent identity", "identity-new-01", "created agent user", "user-new-01"} {
+	for _, want := range []string{
+		"created agent identity", "identity-new-01", "created agent user", "user-new-01",
+		"granted ADO impersonation", "STEP 7 (ADO org admin", "vsaex.dev.azure.com",
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q\n%s", want, out)
 		}
 	}
 
-	// Both writes go AS the blueprint (the client-credential token), never the
-	// delegated discovery token — the writer≠scorer IAM split, in code.
+	// Three writes: identity + user AS the blueprint (client-cred token), the ADO
+	// impersonation grant on the operator's delegated session — admin consent is the
+	// operator's act, creation is the blueprint's. The writer≠scorer IAM split, in code.
 	posts := fake.recordedPosts()
-	if len(posts) != 2 {
-		t.Fatalf("POSTs = %d, want 2 (identity then user)", len(posts))
+	if len(posts) != 3 {
+		t.Fatalf("POSTs = %d, want 3 (identity, user, ADO grant)", len(posts))
 	}
 	for _, p := range posts {
+		if strings.HasSuffix(p.path, "/oauth2PermissionGrants") {
+			if p.authz != "Bearer "+fakeGraphToken {
+				t.Errorf("grant POST authz = %q, want the delegated operator token (admin consent is the operator's)", p.authz)
+			}
+			continue
+		}
 		if p.authz != "Bearer "+blueprintCCToken {
 			t.Errorf("POST %s authz = %q, want the blueprint client-cred token", p.path, p.authz)
-		}
-		if strings.Contains(p.authz, fakeGraphToken) {
-			t.Errorf("POST %s carried the delegated discovery token, want the blueprint token", p.path)
 		}
 	}
 
@@ -770,6 +800,15 @@ func TestProvision_EnsureRole_CreatesIdentityAndUserAsBlueprint(t *testing.T) {
 			t.Errorf("user POST body missing %q\n%s", want, userBody)
 		}
 	}
+	grantBody := postBodyBySuffix(t, posts, "/oauth2PermissionGrants")
+	for _, want := range []string{
+		`"consentType":"Principal"`, `"scope":"user_impersonation"`,
+		`"clientId":"identity-new-01"`, `"principalId":"user-new-01"`, `"resourceId":"ado-sp-object-01"`,
+	} {
+		if !strings.Contains(grantBody, want) {
+			t.Errorf("grant POST body missing %q\n%s", want, grantBody)
+		}
+	}
 }
 
 func TestProvision_EnsureRole_ReusesExistingWithoutWrite(t *testing.T) {
@@ -777,11 +816,14 @@ func TestProvision_EnsureRole_ReusesExistingWithoutWrite(t *testing.T) {
 	swapDeriveSponsor(t, func(context.Context, string) (string, error) { return "sponsor-signed-in", nil })
 	t.Setenv("MANDAT_TEST_BP_SECRET", "s3cr3t")
 
-	// A registry where role "mandat-dev" and its paired user already exist.
+	// A registry where role "mandat-dev", its paired user, and the ADO grant all
+	// already exist — the full-reuse path issues zero writes across all steps.
 	fake := &fakeGraphServer{
 		blueprintsBody: `{"value":[{"id":"bp-object-01","appId":"appid-blueprint-01","displayName":"mandat-spike-blueprint"}]}`,
 		identitiesBody: `{"value":[{"id":"identity-dev-01","displayName":"mandat-dev"}]}`,
 		usersBody:      `{"value":[{"id":"user-dev-01","displayName":"mandat-dev user","userPrincipalName":"mandat-dev@contoso.onmicrosoft.com","identityParentId":"identity-dev-01"}]}`,
+		spByAppIDBody:  `{"id":"ado-sp-object-01","appId":"499b84ac-1321-427f-aa17-267ca6975798"}`,
+		grantsBody:     `{"value":[{"resourceId":"ado-sp-object-01"}]}`,
 	}
 	srv := fake.start(t)
 	sts := fakeSTS(t, blueprintCCToken)
@@ -801,8 +843,10 @@ func TestProvision_EnsureRole_ReusesExistingWithoutWrite(t *testing.T) {
 	}
 
 	out := stdout.String()
-	if !strings.Contains(out, "reused existing agent identity") || !strings.Contains(out, "reused existing agent user") {
-		t.Errorf("output missing the reuse report\n%s", out)
+	for _, want := range []string{"reused existing agent identity", "reused existing agent user", "reused existing ADO impersonation grant"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n%s", want, out)
+		}
 	}
 	for _, m := range fake.recordedMethods() {
 		if m == http.MethodPost {
@@ -846,6 +890,47 @@ func TestProvision_EnsureRole_DryRun_PrintsPlanAndIssuesNoWrites(t *testing.T) {
 		if m == http.MethodPost {
 			t.Errorf("dry-run issued a POST, want none (methods: %v)", fake.recordedMethods())
 		}
+	}
+}
+
+func TestProvision_EnsureRole_Step6Forbidden_PrintsAdminCallAndContinues(t *testing.T) {
+	swapGraphTokenSource(t, func(context.Context) (string, error) { return fakeGraphToken, nil })
+	swapDeriveSponsor(t, func(context.Context, string) (string, error) { return "sponsor-signed-in", nil })
+	t.Setenv("MANDAT_TEST_BP_SECRET", "s3cr3t")
+
+	fake := dogfoodGraphServer()
+	fake.createStatus = http.StatusCreated
+	fake.createBody = `{"id":"identity-new-01","displayName":"mandat-dev"}`
+	fake.userCreateStatus = http.StatusCreated
+	fake.userCreateBody = `{"id":"user-new-01","displayName":"mandat-dev user","userPrincipalName":"mandat-dev@contoso.onmicrosoft.com","identityParentId":"identity-new-01"}`
+	fake.grantCreateStatus = http.StatusForbidden // operator lacks admin-consent rights for step 6
+	srv := fake.start(t)
+	sts := fakeSTS(t, blueprintCCToken)
+
+	var stdout, stderr strings.Builder
+	code := provision([]string{
+		"--ensure-role", "mandat-dev",
+		"--blueprint-app-id", "blueprint-appid-01",
+		"--blueprint-tenant", "tenant-01",
+		"--blueprint-secret-env", "MANDAT_TEST_BP_SECRET",
+		"--upn-domain", "contoso.onmicrosoft.com",
+		"--ado-org", "contoso-eng",
+		"--graph-url", srv.URL,
+		"--authority-url", sts.URL,
+	}, &stdout, &stderr)
+	// AC-14.4: a privilege gap on step 6 does not abort — identity + user still created.
+	if code != 0 {
+		t.Fatalf("provision() code = %d, want 0 (a step-6 privilege gap must not abort the ladder); stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "created agent user") {
+		t.Errorf("identity/user creation should have completed before the step-6 gap\n%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "a tenant admin must run") {
+		t.Errorf("stderr missing the fail-with-guidance admin call for step 6\n%s", stderr.String())
+	}
+	// --ado-org renders step 7's entitlement URL for the admin.
+	if !strings.Contains(stdout.String(), "vsaex.dev.azure.com/contoso-eng/") {
+		t.Errorf("step 7 output missing --ado-org in the entitlement URL\n%s", stdout.String())
 	}
 }
 

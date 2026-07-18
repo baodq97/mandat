@@ -66,9 +66,36 @@ Across separate process invocations the az active tenant reverted to the worksta
 set/pin the tenant per invocation rather than trusting the ambient default — the same hazard
 US-0015 fixes for the discovery token, generalized to every az call.
 
+### F5. Blueprint client-credential path creates identity + paired user, live
+
+F1 proved the owner-**delegated** identity create. A second live run proved the production
+path the design actually wants: the blueprint acting as its **own** client, no operator
+standing privilege. From a throwaway Go driver over `internal/entra`:
+
+- The blueprint minted its own Graph token via the OAuth2 client-credentials grant
+  (`POST {authority}/{tenant}/oauth2/v2.0/token`, client = blueprint appId, secret) — no
+  delegated operator token.
+- On that token it created an agent identity (a `ServiceIdentity` service principal). The
+  `AgentIdentity.CreateAsManager` permission is **intrinsic** to a blueprint principal — it
+  cannot be granted explicitly (`appRoleAssignments` rejects it "cannot be granted to agent
+  identity blueprint principals") — so identity creation needs no consent step.
+- On the same token it created the paired agent user (`#microsoft.graph.agentUser`), after
+  the operator self-consented the one explicit permission the user write needs
+  (`AgentIdUser.ReadWrite.IdentityParentedBy`). The user create **400'd "IdentityParent does
+  not exist" on the first attempt and 201'd on retry** after a short backoff — the create→use
+  propagation lag, which the shipped `CreateAgentUser` retry-backoff (AC-14.5) handles.
+- Both objects were independently verified through a **delegated** read (writer ≠ scorer),
+  correctly parented 1:1, then deleted; the throwaway secret and consent were reverted, leaving
+  the tenant unchanged.
+
+Consequence: `--ensure-role` provisions a role identity + user entirely as the blueprint, so a
+customer operator with no standing Agent-ID privilege stands up the installation. This is the
+live evidence AC-14.3 cites.
+
 ## Grounds
 
-- Resolves the open least-privilege spike in `US-0014` (Gaps) for the owner create/delete path.
+- Resolves the open least-privilege spike in `US-0014` (Gaps) for the owner create/delete path,
+  and (F5) proves the blueprint client-credential identity + paired-user path AC-14.3 ships.
 - Evidence for `US-0016` (init auto-derive from the az session + Agent-ID registry).
 - Confirms `US-0015` (tenant pin) live: the derived tenant pins the discovery token.
 - Primary Graph surface: `docs/research/entra-agent-id-provisioning-surface.md`.

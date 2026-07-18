@@ -55,19 +55,17 @@ var deriveProvisionAccount = func(ctx context.Context) (string, error) {
 }
 
 // deriveSponsor resolves the default sponsor object id for a created agent
-// identity — the signed-in az user. It best-effort pins the lookup to the chosen
-// account (--subscription accountID), but az ad signed-in-user show follows the az
-// LOGIN context, so when the pinned account is not the active login it resolves
-// the wrong user; pass --sponsor explicitly in that case (the flag help says so).
+// identity — the signed-in az user. Unlike token mints, `az ad` commands follow
+// the active az LOGIN context and reject `--subscription` outright (exit 2), so
+// the lookup cannot be pinned to a chosen account here: it resolves against
+// whichever tenant is active. The operator must have the target tenant active
+// (ensure-auth) or pass --sponsor explicitly (the flag help says so). accountID is
+// accepted to match the seam signature but intentionally unused for that reason.
 // A package-level seam (like graphTokenSource) so provision_test.go injects a fake
 // with no az shellout; production shells az. A created identity is sponsored by a
 // named human (the Mandate invariant); the operator can override with --sponsor.
-var deriveSponsor = func(ctx context.Context, accountID string) (string, error) {
-	args := []string{"ad", "signed-in-user", "show", "--query", "id", "-o", "tsv"}
-	if accountID != "" {
-		args = append(args, "--subscription", accountID)
-	}
-	out, err := exec.CommandContext(ctx, "az", args...).Output()
+var deriveSponsor = func(ctx context.Context, _ string) (string, error) {
+	out, err := exec.CommandContext(ctx, "az", "ad", "signed-in-user", "show", "--query", "id", "-o", "tsv").Output()
 	if err != nil {
 		return "", fmt.Errorf("az ad signed-in-user show: %w", err)
 	}
@@ -107,6 +105,7 @@ func provision(args []string, stdout, stderr io.Writer) int {
 	blueprintSecretEnv := fs.String("blueprint-secret-env", "", "name of the environment variable holding the blueprint client secret; the value is read at mint time and never written to disk (--ensure-role). Mutually exclusive with --blueprint-secret-file")
 	blueprintSecretFile := fs.String("blueprint-secret-file", "", "path to a file holding the blueprint client secret (the systemd LoadCredential= delivery); read at mint time, never written elsewhere (--ensure-role). Mutually exclusive with --blueprint-secret-env")
 	upnDomain := fs.String("upn-domain", "", "verified tenant domain for a created agent user's userPrincipalName, e.g. contoso.onmicrosoft.com (--ensure-role)")
+	adoOrg := fs.String("ado-org", "", "Azure DevOps org name, used to render step 7's entitlement call for the ADO admin (--ensure-role); optional")
 	authorityURL := fs.String("authority-url", "", "override the Entra STS authority base URL for the client-credential mint (test seam)")
 	ensureAuth := fs.Bool("ensure-auth", false, "ensure an az session exists before provisioning: if signed out, drive `az login --tenant <--tenant>` (device code); if already signed in, report the account and create no new session. Never writes a token to disk")
 	tenant := fs.String("tenant", "", "the Entra tenant `az login` targets for --ensure-auth (device code)")
@@ -148,7 +147,7 @@ func provision(args []string, stdout, stderr io.Writer) int {
 			secretFile:   *blueprintSecretFile,
 			authorityURL: *authorityURL,
 		}
-		return runEnsureRole(ctx, client, cred, *graphURL, *ensureRole, *sponsor, resolvedAccount, *upnDomain, *dryRun, stdout, stderr)
+		return runEnsureRole(ctx, client, cred, *graphURL, *ensureRole, *sponsor, resolvedAccount, *upnDomain, *adoOrg, *dryRun, stdout, stderr)
 	}
 
 	reg, err := client.DiscoverRegistry(ctx)
@@ -356,7 +355,7 @@ func (b blueprintCred) tokenSource() (entra.TokenSource, error) {
 // client, and the user create carries the retry-backoff over the create→use lag
 // (AC-14.5). Every POST is printed before it is issued (AC-14.7); --dry-run prints
 // the plan and issues zero writes (AC-14.6).
-func runEnsureRole(ctx context.Context, delegated *entra.Client, cred blueprintCred, graphURL, role, sponsorFlag, accountID, upnDomain string, dryRun bool, stdout, stderr io.Writer) int {
+func runEnsureRole(ctx context.Context, delegated *entra.Client, cred blueprintCred, graphURL, role, sponsorFlag, accountID, upnDomain, adoOrg string, dryRun bool, stdout, stderr io.Writer) int {
 	if cred.appID == "" || cred.tenant == "" {
 		fmt.Fprintln(stderr, "mandat provision: --ensure-role needs --blueprint-app-id and --blueprint-tenant (the blueprint mints its own client-credential token).")
 		return 1
@@ -422,7 +421,14 @@ func runEnsureRole(ctx context.Context, delegated *entra.Client, cred blueprintC
 		} else {
 			fmt.Fprintf(stdout, "PLAN (dry-run, no write): identity %q absent; ensure would issue the identity POST above.\n", role)
 		}
-		fmt.Fprintln(stdout, "PLAN (dry-run, no write): the user POST above follows once the identity id is known. Issued zero writes.")
+		fmt.Fprintln(stdout, "PLAN (dry-run, no write): the user POST above follows once the identity id is known.")
+		clientID, principalID := planParent, "<agent-user-oid-from-the-user-create-above>"
+		if u, ok := existingUserFor(reg, identity.ID); ok {
+			principalID = u.ID
+		}
+		ensureADOGrant(ctx, delegated, clientID, principalID, planSpec.UserPrincipalName, true, stdout, stderr)
+		printADOEntitlement(stdout, planSpec.UserPrincipalName, adoOrg)
+		fmt.Fprintln(stdout, "PLAN (dry-run, no write): issued zero writes.")
 		return 0
 	}
 
@@ -437,21 +443,97 @@ func runEnsureRole(ctx context.Context, delegated *entra.Client, cred blueprintC
 		fmt.Fprintf(stdout, "reused existing agent identity %q (id %s); no write issued.\n", identity.DisplayName, identity.ID)
 	}
 
-	for _, u := range reg.Users {
-		if u.IdentityParentID != "" && u.IdentityParentID == identity.ID {
-			fmt.Fprintf(stdout, "reused existing agent user %q (id %s); no write issued.\n", u.UserPrincipalName, u.ID)
-			return 0
+	user, haveUser := existingUserFor(reg, identity.ID)
+	if haveUser {
+		fmt.Fprintf(stdout, "reused existing agent user %q (id %s); no write issued.\n", user.UserPrincipalName, user.ID)
+	} else {
+		userSpec.IdentityID = identity.ID
+		user, err = cc.CreateAgentUser(ctx, userSpec, entra.RetryPolicy{})
+		if err != nil {
+			return handleWriteErr(stderr, fmt.Sprintf("create user %q", userSpec.UserPrincipalName), err,
+				"consent AgentIdUser.ReadWrite.IdentityParentedBy (appRole 4aa6e624-eee0-40ab-bdd8-f9639038a614) on the blueprint via admin-consent, then retry.")
 		}
+		fmt.Fprintf(stdout, "created agent user %q (id %s) parented to the identity AS the blueprint.\n", user.UserPrincipalName, user.ID)
 	}
 
-	userSpec.IdentityID = identity.ID
-	user, err := cc.CreateAgentUser(ctx, userSpec, entra.RetryPolicy{})
-	if err != nil {
-		return handleWriteErr(stderr, fmt.Sprintf("create user %q", userSpec.UserPrincipalName), err,
-			"consent AgentIdUser.ReadWrite.IdentityParentedBy (appRole 4aa6e624-eee0-40ab-bdd8-f9639038a614) on the blueprint via admin-consent, then retry.")
-	}
-	fmt.Fprintf(stdout, "created agent user %q (id %s) parented to the identity AS the blueprint.\n", user.UserPrincipalName, user.ID)
+	// Steps 6-7: the two privileged steps that let the agent user act against Azure
+	// DevOps. Step 6 (the delegated impersonation grant) is attempted on the
+	// operator's own session; step 7 (the ADO org-admin entitlement) is printed for
+	// an ADO admin. Neither aborts the ladder — the identity and user above are
+	// provisioned regardless (AC-14.4).
+	ensureADOGrant(ctx, delegated, identity.ID, user.ID, user.UserPrincipalName, false, stdout, stderr)
+	printADOEntitlement(stdout, user.UserPrincipalName, adoOrg)
 	return 0
+}
+
+// existingUserFor returns the agent user paired to identityID through its
+// identityParentId link, or ok=false when none is.
+func existingUserFor(reg entra.Registry, identityID string) (entra.AgentUser, bool) {
+	for _, u := range reg.Users {
+		if u.IdentityParentID != "" && u.IdentityParentID == identityID {
+			return u, true
+		}
+	}
+	return entra.AgentUser{}, false
+}
+
+// ensureADOGrant runs step 6 — the delegated grant that lets the agent user
+// impersonate on Azure DevOps. It resolves the ADO service principal (its object
+// id differs per tenant), prints the exact POST before issuing (AC-14.7), and on a
+// real run creates the grant idempotently on the operator's delegated session (the
+// session that holds admin-consent rights, not the blueprint token). It never
+// aborts the ladder: a missing privilege, a resolve failure, or dryRun each print
+// the exact call for an admin (or as a plan) and return, since the identity and
+// user are already provisioned (AC-14.4).
+func ensureADOGrant(ctx context.Context, delegated *entra.Client, clientID, principalID, upn string, dryRun bool, stdout, stderr io.Writer) {
+	adoSPID, err := delegated.ResolveServicePrincipalID(ctx, entra.ADOAppID)
+	if err != nil {
+		fmt.Fprintf(stderr, "STEP 6 (ADO impersonation grant for %s): could not resolve the Azure DevOps service principal: %v\n", upn, err)
+		fmt.Fprintf(stderr, "  A tenant admin must POST /oauth2PermissionGrants {clientId:%s, consentType:Principal, principalId:%s, resourceId:<Azure DevOps SP id>, scope:%s}\n",
+			clientID, principalID, entra.ADOImpersonationScope)
+		return
+	}
+	spec := entra.OAuth2GrantSpec{ClientID: clientID, PrincipalID: principalID, ResourceID: adoSPID, Scope: entra.ADOImpersonationScope}
+	call, err := delegated.OAuth2GrantCall(spec)
+	if err != nil {
+		fmt.Fprintf(stderr, "STEP 6 (ADO impersonation grant): %v\n", err)
+		return
+	}
+	fmt.Fprintf(stdout, "WRITE (step 6, ADO impersonation grant, on your delegated session): %s %s\n    body: %s\n", call.Method, call.Endpoint, call.Body)
+
+	if dryRun {
+		fmt.Fprintln(stdout, "PLAN (dry-run, no write): step 6 would issue the grant above, or reuse an existing one.")
+		return
+	}
+
+	if has, err := delegated.HasOAuth2Grant(ctx, principalID, adoSPID); err == nil && has {
+		fmt.Fprintln(stdout, "reused existing ADO impersonation grant; no write issued (step 6).")
+		return
+	}
+	if err := delegated.CreateOAuth2Grant(ctx, spec); err != nil {
+		var privErr *entra.PrivilegeError
+		if errors.As(err, &privErr) {
+			fmt.Fprintf(stderr, "STEP 6 (ADO impersonation grant): your session lacks admin-consent rights; a tenant admin must run:\n  %s %s\n    body: %s\n", call.Method, call.Endpoint, call.Body)
+		} else {
+			fmt.Fprintf(stderr, "STEP 6 (ADO impersonation grant) failed — run the call above by hand: %v\n", err)
+		}
+		return
+	}
+	fmt.Fprintf(stdout, "granted ADO impersonation to %s (step 6).\n", upn)
+}
+
+// printADOEntitlement prints step 7 — the Azure DevOps user entitlement and group
+// add. It is always printed, never issued: it is an Azure DevOps org-admin action
+// on the ADO REST surface (a different host and token than Graph) that the design
+// keeps manual (AC-14.4). org renders when known via --ado-org, else a placeholder.
+func printADOEntitlement(stdout io.Writer, upn, org string) {
+	if strings.TrimSpace(org) == "" {
+		org = "<your-ado-org>"
+	}
+	body := fmt.Sprintf(`{"accessLevel":{"accountLicenseType":"express"},"user":{"principalName":%q,"subjectKind":"user"}}`, upn)
+	fmt.Fprintln(stdout, "STEP 7 (ADO org admin — entitle the agent user in Azure DevOps, run this yourself):")
+	fmt.Fprintf(stdout, "  POST https://vsaex.dev.azure.com/%s/_apis/userentitlements?api-version=7.1-preview.3\n    body: %s\n", org, body)
+	fmt.Fprintf(stdout, "  then add %s to the project's Contributors group.\n", upn)
 }
 
 // handleWriteErr renders a failed Graph write: a *PrivilegeError (403) prints the
