@@ -914,3 +914,162 @@ func postBodyBySuffix(t *testing.T, posts []recordedPost, suffix string) string 
 	t.Fatalf("no recorded POST with path suffix %q", suffix)
 	return ""
 }
+
+// swapAz installs test doubles for the three az seams ensure-auth uses (az
+// detection, account-show, device-code login) for the test's duration. It mutates
+// package state, so its callers run non-parallel.
+func swapAz(t *testing.T,
+	path func() (string, error),
+	acct func(context.Context) (azAccount, error),
+	login func(context.Context, string, io.Writer, io.Writer) error,
+) {
+	t.Helper()
+	sp, sa, sl := azPath, azLoggedInAccount, azLogin
+	if path != nil {
+		azPath = path
+	}
+	if acct != nil {
+		azLoggedInAccount = acct
+	}
+	if login != nil {
+		azLogin = login
+	}
+	t.Cleanup(func() { azPath, azLoggedInAccount, azLogin = sp, sa, sl })
+}
+
+func TestProvision_EnsureAuth_AlreadyLoggedIn_ReportsNoNewSession(t *testing.T) {
+	loginRan := false
+	swapAz(t,
+		func() (string, error) { return "/usr/bin/az", nil },
+		func(context.Context) (azAccount, error) {
+			return azAccount{ID: "acct-01", TenantID: "tenant-01", Name: "baotest"}, nil
+		},
+		func(context.Context, string, io.Writer, io.Writer) error { loginRan = true; return nil },
+	)
+	// ensure-auth must dispatch before any account resolution (AC-14.1): a signed-out
+	// operator's account resolution would itself fail, which is the state ensure-auth
+	// fixes. This spy hard-gates the ordering deterministically on any machine — a
+	// reorder that resolves the account first trips it, not just a timing regression.
+	accountResolved := false
+	swapProvisionAccount(t, func(context.Context) (string, error) {
+		accountResolved = true
+		return "must-not-be-resolved-for-ensure-auth", nil
+	})
+
+	var stdout, stderr strings.Builder
+	code := provision([]string{"--ensure-auth"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("provision() code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+	if loginRan {
+		t.Error("az login was driven while already signed in; AC-14.1 wants no new session")
+	}
+	if accountResolved {
+		t.Error("account resolution ran for --ensure-auth; it must dispatch before resolveProvisionAccount (AC-14.1)")
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "already signed in") || !strings.Contains(out, "acct-01") {
+		t.Errorf("output missing the already-signed-in report\n%s", out)
+	}
+}
+
+func TestProvision_EnsureAuth_LoggedOut_DrivesDeviceCodeLogin(t *testing.T) {
+	calls := 0
+	gotTenant := ""
+	swapAz(t,
+		func() (string, error) { return "/usr/bin/az", nil },
+		func(context.Context) (azAccount, error) {
+			calls++
+			if calls == 1 {
+				return azAccount{}, errors.New("Please run 'az login' to setup account")
+			}
+			return azAccount{ID: "acct-01", TenantID: "tenant-01", Name: "baotest"}, nil
+		},
+		func(_ context.Context, tenant string, stdout, _ io.Writer) error {
+			gotTenant = tenant
+			_, _ = io.WriteString(stdout, "To sign in, use a web browser to open https://microsoft.com/devicelogin and enter the code ABCD1234\n")
+			return nil
+		},
+	)
+
+	var stdout, stderr strings.Builder
+	code := provision([]string{"--ensure-auth", "--tenant", "tenant-01"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("provision() code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+	if gotTenant != "tenant-01" {
+		t.Errorf("az login tenant = %q, want tenant-01", gotTenant)
+	}
+	out := stdout.String()
+	for _, want := range []string{"device-code login", "ABCD1234", "signed in: account acct-01"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n%s", want, out)
+		}
+	}
+}
+
+func TestProvision_EnsureAuth_AzMissing_Errors(t *testing.T) {
+	swapAz(t,
+		func() (string, error) { return "", errors.New("exec: \"az\": not found") },
+		func(context.Context) (azAccount, error) {
+			t.Error("account-show reached despite az missing")
+			return azAccount{}, nil
+		},
+		func(context.Context, string, io.Writer, io.Writer) error {
+			t.Error("login reached despite az missing")
+			return nil
+		},
+	)
+
+	var stdout, stderr strings.Builder
+	code := provision([]string{"--ensure-auth"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("provision() code = 0, want non-zero when az is not on PATH")
+	}
+	if !strings.Contains(stderr.String(), "az CLI not found") {
+		t.Errorf("stderr missing the az-not-found guidance\n%s", stderr.String())
+	}
+}
+
+func TestProvision_EnsureAuth_LoggedOutNoTenant_Errors(t *testing.T) {
+	swapAz(t,
+		func() (string, error) { return "/usr/bin/az", nil },
+		func(context.Context) (azAccount, error) { return azAccount{}, errors.New("signed out") },
+		func(context.Context, string, io.Writer, io.Writer) error {
+			t.Error("login ran without a tenant")
+			return nil
+		},
+	)
+
+	var stdout, stderr strings.Builder
+	code := provision([]string{"--ensure-auth"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("provision() code = 0, want non-zero when signed out with no --tenant")
+	}
+	if !strings.Contains(stderr.String(), "--tenant") {
+		t.Errorf("stderr missing the missing-tenant guidance\n%s", stderr.String())
+	}
+}
+
+func TestProvision_EnsureAuth_TenantMismatch_Warns(t *testing.T) {
+	swapAz(t,
+		func() (string, error) { return "/usr/bin/az", nil },
+		func(context.Context) (azAccount, error) {
+			return azAccount{ID: "acct-01", TenantID: "tenant-active"}, nil
+		},
+		func(context.Context, string, io.Writer, io.Writer) error {
+			t.Error("login ran while already signed in")
+			return nil
+		},
+	)
+
+	var stdout, stderr strings.Builder
+	code := provision([]string{"--ensure-auth", "--tenant", "tenant-wanted"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("provision() code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "note:") || !strings.Contains(out, "tenant-wanted") {
+		t.Errorf("output missing the tenant-mismatch warning\n%s", out)
+	}
+}

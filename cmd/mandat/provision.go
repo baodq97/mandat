@@ -108,11 +108,20 @@ func provision(args []string, stdout, stderr io.Writer) int {
 	blueprintSecretFile := fs.String("blueprint-secret-file", "", "path to a file holding the blueprint client secret (the systemd LoadCredential= delivery); read at mint time, never written elsewhere (--ensure-role). Mutually exclusive with --blueprint-secret-env")
 	upnDomain := fs.String("upn-domain", "", "verified tenant domain for a created agent user's userPrincipalName, e.g. contoso.onmicrosoft.com (--ensure-role)")
 	authorityURL := fs.String("authority-url", "", "override the Entra STS authority base URL for the client-credential mint (test seam)")
+	ensureAuth := fs.Bool("ensure-auth", false, "ensure an az session exists before provisioning: if signed out, drive `az login --tenant <--tenant>` (device code); if already signed in, report the account and create no new session. Never writes a token to disk")
+	tenant := fs.String("tenant", "", "the Entra tenant `az login` targets for --ensure-auth (device code)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
 	ctx := context.Background()
+
+	// ensure-auth runs before any account resolution or client build: those mint a
+	// token and would themselves fail when the operator is signed out, which is
+	// exactly the state ensure-auth exists to fix (AC-14.1).
+	if *ensureAuth {
+		return runEnsureAuth(ctx, *tenant, stdout, stderr)
+	}
 
 	resolvedAccount, err := resolveProvisionAccount(ctx, *subscription)
 	if err != nil {
@@ -457,6 +466,103 @@ func handleWriteErr(stderr io.Writer, what string, err error, fixHint string) in
 	}
 	fmt.Fprintf(stderr, "mandat provision: %s: %v\n", what, err)
 	return 1
+}
+
+// azAccount is the subset of `az account show` provision reports for ensure-auth:
+// the account id, its tenant, and the human-readable name. No token field — a
+// token is never read or persisted by ensure-auth (AC-14.1/AC-14.8).
+type azAccount struct {
+	ID       string `json:"id"`
+	TenantID string `json:"tenantId"`
+	Name     string `json:"name"`
+}
+
+// azPath reports the az CLI's location, erroring when az is not on PATH. A
+// package-level seam so a test drives the az-missing branch with no real lookup.
+var azPath = func() (string, error) { return exec.LookPath("az") }
+
+// azLoggedInAccount returns the active az account, or an error when the operator
+// is signed out (`az account show` exits non-zero). A package-level seam so a test
+// drives both the signed-in and signed-out branches with no az shellout.
+var azLoggedInAccount = func(ctx context.Context) (azAccount, error) {
+	out, err := exec.CommandContext(ctx, "az", "account", "show",
+		"--query", "{id:id, tenantId:tenantId, name:name}", "-o", "json").Output()
+	if err != nil {
+		return azAccount{}, err
+	}
+	var a azAccount
+	if err := json.Unmarshal(out, &a); err != nil {
+		return azAccount{}, fmt.Errorf("parse az account show: %w", err)
+	}
+	return a, nil
+}
+
+// azLogin drives a device-code `az login` into tenant, streaming az's own
+// device-code prompt straight to the operator (stdout/stderr) so they see the URL
+// and code. A package-level seam so a test asserts it is (or is not) invoked
+// without a browser round-trip.
+var azLogin = func(ctx context.Context, tenant string, stdout, stderr io.Writer) error {
+	args := []string{"login", "--use-device-code"}
+	if tenant != "" {
+		args = append(args, "--tenant", tenant)
+	}
+	cmd := exec.CommandContext(ctx, "az", args...)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	return cmd.Run()
+}
+
+// runEnsureAuth is US-0014's ensure-auth flow (AC-14.1): it guarantees an az
+// session exists for the provisioning flows to mint tokens under, without ever
+// persisting a token. When az is absent it fails with an install hint; when the
+// operator is already signed in it reports the account and creates no new session;
+// when signed out it drives a device-code `az login --tenant <tenant>` and reports
+// the resulting account. It writes no token to disk, config.yaml, or any file —
+// the session lives in az's own store, and the flows below mint per-call tokens
+// from it (AC-14.8).
+func runEnsureAuth(ctx context.Context, tenant string, stdout, stderr io.Writer) int {
+	if _, err := azPath(); err != nil {
+		fmt.Fprintln(stderr, "mandat provision --ensure-auth: az CLI not found on PATH; install the Azure CLI (https://aka.ms/azcli) and retry.")
+		return 1
+	}
+
+	if acct, err := azLoggedInAccount(ctx); err == nil && acct.ID != "" {
+		fmt.Fprintf(stdout, "already signed in: account %s (tenant %s)%s; no new session created.\n",
+			acct.ID, acct.TenantID, nameSuffix(acct.Name))
+		if tenant != "" && !strings.EqualFold(tenant, acct.TenantID) {
+			fmt.Fprintf(stdout, "note: --tenant %s differs from the active tenant %s; pin the provisioning target with --subscription, or run `az login --tenant %s` yourself to switch.\n",
+				tenant, acct.TenantID, tenant)
+		}
+		return 0
+	}
+
+	if strings.TrimSpace(tenant) == "" {
+		fmt.Fprintln(stderr, "mandat provision --ensure-auth: not signed in and no --tenant given; pass --tenant <entra-tenant> to drive `az login`.")
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "not signed in; starting device-code login to tenant %s...\n", tenant)
+	if err := azLogin(ctx, tenant, stdout, stderr); err != nil {
+		fmt.Fprintf(stderr, "mandat provision --ensure-auth: az login failed: %v\n", err)
+		return 1
+	}
+
+	acct, err := azLoggedInAccount(ctx)
+	if err != nil {
+		fmt.Fprintf(stdout, "signed in to tenant %s.\n", tenant)
+		return 0
+	}
+	fmt.Fprintf(stdout, "signed in: account %s (tenant %s)%s.\n", acct.ID, acct.TenantID, nameSuffix(acct.Name))
+	return 0
+}
+
+// nameSuffix renders " — <name>" for a non-empty account name, or "" so the
+// report reads cleanly when az returns no display name.
+func nameSuffix(name string) string {
+	if strings.TrimSpace(name) == "" {
+		return ""
+	}
+	return " — " + name
 }
 
 // resolveSponsors returns the sponsor object ids for a created agent identity:

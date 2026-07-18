@@ -82,12 +82,17 @@ separation the CLI survey documents (patterns 1, 11).
 
 ## Acceptance criteria
 
-- [ ] AC-14.1 Given `az` is absent or the operator is logged out, `mandat provision
-      ensure-auth` drives `az login --tenant <tenant>` (device code). Given the operator is
-      already logged in, observe ensure-auth creates no new session and reports the existing
-      account instead. Observe no Graph or Azure CLI token is ever written to disk, logged in
-      full, or written to `config.yaml`; tokens are minted in-process for the flow that needs
-      them and held only for that call.
+- [ ] AC-14.1 Given `az` is absent, `mandat provision --ensure-auth` fails with an
+      install-the-CLI hint before any other step. Given the operator is logged out, it drives
+      `az login --tenant <--tenant> --use-device-code`, streaming az's device-code prompt to
+      the operator, then reports the resulting account. Given the operator is already logged
+      in, observe it creates no new session and reports the existing account instead (and warns
+      when `--tenant` differs from the active tenant, without switching). Observe no Graph or
+      Azure CLI token is ever written to disk, logged in full, or written to `config.yaml`; the
+      session lives in az's own store and the flows below mint per-call tokens from it. Shipped
+      and smoke-tested live 2026-07-18 (the already-signed-in path reported the active dogfood
+      account and created no session). `--ensure-auth` runs before account resolution or client
+      build, since those would themselves fail on a signed-out operator.
 - [ ] AC-14.2 Given a blueprint tagged for this installation already exists (discovered via
       `GET /applications/microsoft.graph.agentIdentityBlueprint`), observe `ensure-blueprint`
       creates nothing and reports the existing blueprint's `appId`, never a duplicate
@@ -175,7 +180,7 @@ story.
   (e.g. `contoso.onmicrosoft.com`) and the user's userPrincipalName is `<role>@<domain>`.
   Auto-deriving the domain from the tenant's default verified domain remains a follow-up, not
   a blocker — an explicit flag is the honest MVP.
-- Still open for a complete ladder (not covered by the `--ensure-role` slice): AC-14.1
-  ensure-auth (`az login` drive) and AC-14.4's ADO steps 6–7 (the `oauth2PermissionGrant`
+- Still open for a complete ladder: AC-14.4's ADO steps 6–7 (the `oauth2PermissionGrant`
   admin consent and the ADO entitlement/group add). `--ensure-role` covers the Graph identity
-  + user creation only; the ADO grant/entitlement steps are not yet wired.
+  + user creation only; the ADO grant/entitlement steps are not yet wired. (AC-14.1 ensure-auth
+  and the UPN-domain question are now resolved.)
