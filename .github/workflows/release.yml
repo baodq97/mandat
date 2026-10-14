@@ -37,11 +37,11 @@ jobs:
         id: tag
         run: echo "tag=${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ steps.tag.outputs.tag }}
 
-      - uses: actions/setup-go@v6.5.0
+      - uses: actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
           # cache: true is the default (module + build cache keyed on go.mod)
@@ -65,7 +65,7 @@ jobs:
       - name: Checksum
         run: sha256sum mandat-linux-${{ matrix.arch }} > mandat-linux-${{ matrix.arch }}.sha256
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mandat-linux-${{ matrix.arch }}
           path: |
@@ -88,13 +88,13 @@ jobs:
         id: tag
         run: echo "tag=${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
 
       - name: Publish release ${{ steps.tag.outputs.tag }}
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
